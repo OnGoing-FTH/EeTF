@@ -94,21 +94,26 @@ class TokenSelector(nn.Module):
         x: Tensor,
         coords: Tensor,
         valid_mask: Optional[Tensor] = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
-        """Return selected x/coords, logits, keep probabilities, and indices."""
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        """Return selected tokens and the complementary remaining indices."""
         logits = self.router(x)
         keep_probs = logits.softmax(dim=-1)[..., 1]
+        scores = keep_probs
         if valid_mask is not None:
-            keep_probs = keep_probs.masked_fill(~valid_mask.bool(), -torch.inf)
+            scores = scores.masked_fill(~valid_mask.bool(), -torch.inf)
         token_count = x.shape[1]
         keep_count = max(1, int(token_count * self.keep_ratio))
         keep_count = min(keep_count, token_count)
         if self.training:
             sample = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1)[..., 1]
-            scores = sample + keep_probs.clamp_min(0.0) * 1e-6
-        else:
-            scores = keep_probs
+            scores = sample + scores.clamp_min(0.0) * 1e-6
         _, indices = torch.topk(scores, k=keep_count, dim=1, largest=True, sorted=True)
         selected_x = x.gather(1, indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
         selected_coords = coords.gather(1, indices.unsqueeze(-1).expand(-1, -1, 2))
-        return selected_x, selected_coords, logits, keep_probs, indices
+        all_indices = torch.arange(token_count, device=x.device).expand(x.shape[0], -1)
+        selected_mask = torch.zeros_like(all_indices, dtype=torch.bool)
+        selected_mask.scatter_(1, indices, True)
+        remaining_indices = all_indices.masked_select(~selected_mask).reshape(
+            x.shape[0], token_count - keep_count
+        )
+        return selected_x, selected_coords, logits, keep_probs, indices, remaining_indices
