@@ -13,7 +13,9 @@ class SparseEdgeLoss(nn.Module):
         bce_weight: Weight assigned to the BCE term.
         dice_weight: Weight assigned to the Dice term.
         positive_weight: Optional fixed foreground weight. If omitted, the
-            foreground weight is computed per batch as ``negative / positive``.
+            foreground weight is computed from non-zero target support as
+            ``background_pixels / line_pixels``.
+        foreground_threshold: Normalized target threshold for a line pixel.
         eps: Numerical-stability constant.
     """
 
@@ -22,20 +24,22 @@ class SparseEdgeLoss(nn.Module):
         bce_weight: float = 1.0,
         dice_weight: float = 1.0,
         positive_weight: float | None = None,
+        foreground_threshold: float = 0.0,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
         self.bce_weight = bce_weight
         self.dice_weight = dice_weight
         self.positive_weight = positive_weight
+        self.foreground_threshold = foreground_threshold
         self.eps = eps
 
     def forward(self, logits: Tensor, targets: Tensor) -> Tensor:
         """Return weighted BCE plus Dice loss for ``[B, 1, H, W]`` tensors."""
         if self.positive_weight is None:
-            positive = targets.sum()
-            negative = targets.numel() - positive
-            pos_weight = (negative / positive.clamp_min(self.eps)).detach()
+            line_pixels = (targets > self.foreground_threshold).sum()
+            background_pixels = targets.numel() - line_pixels
+            pos_weight = (background_pixels / line_pixels.clamp_min(1)).detach()
         else:
             pos_weight = logits.new_tensor(self.positive_weight)
 

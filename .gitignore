@@ -1,5 +1,7 @@
-data
-engine
+data/edge_maps
+data/images
 logs
 checkpoints
 tests
+outputs
+__pycache__/

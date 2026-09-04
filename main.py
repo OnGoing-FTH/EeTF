@@ -177,4 +177,3 @@ if __name__ == "__main__":
             print(f"selected index shape:     {tuple(outputs['selected_indices'].shape)}")
             print(f"remaining index shape:    {tuple(outputs['remaining_indices'].shape)}")
             print(f"patch target shape:       {tuple(outputs['patch_targets'].shape)}")
-            print()
