@@ -32,6 +32,7 @@ class SelectedPatchDecoder(nn.Module):
             activation="gelu",
         )
         self.transformer = nn.TransformerEncoder(transformer_layer, num_layers=1)
+        self.context_projection = nn.Linear(768, embed_dim)
         self.decoder = nn.Sequential(
             nn.ConvTranspose2d(embed_dim, 64, kernel_size=2, stride=2),
             nn.GELU(),
@@ -40,9 +41,13 @@ class SelectedPatchDecoder(nn.Module):
             nn.Conv2d(32, 1, kernel_size=1),
         )
 
-    def forward(self, patches: Tensor) -> Tensor:
-        """Return detailed pixel logits with shape ``[N1, 1, 64, 32]``."""
+    def forward(self, patches: Tensor, context: Tensor) -> Tensor:
+        """Decode raw patches conditioned on RoPE context ``[B, N1, 768]``."""
+        if context.ndim != 3 or context.shape[-1] != 768 or context.shape[0] * context.shape[1] != patches.shape[0]:
+            raise ValueError("context must be [B, N1, 768], matching flattened patches")
         features = self.encoder(patches)  # [N1, 128, 32, 16]
+        conditioning = self.context_projection(context).reshape(-1, features.shape[1], 1, 1)
+        features = features + conditioning
         batch_size, channels, height, width = features.shape
         tokens = features.flatten(start_dim=2).transpose(1, 2)
         tokens = self.transformer(tokens)

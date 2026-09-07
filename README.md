@@ -115,7 +115,7 @@ batch_size = 1
     -> BlockFeatureExtractor + MLPBase: [B, N, 768]
     -> FeatureFusion: [B, N, 768]
     -> TokenSelector (DynamicViT)
-       -> selected Patch 分支: 原始 Patch + 局部解码
+       -> selected Patch 分支: 原始 Patch CNN + RoPE 上下文投影融合 + 局部解码
        -> remaining 特征分支: 768 -> 512 -> 32 x 16 + 超分解码
     -> 按原 Patch 索引回填与合并
     -> mask_logits: [B, 1, H, W]
@@ -290,5 +290,14 @@ SparseEdgeLoss 反向传播
 ## 已知限制
 
 - 当前主流程只支持 `batch_size=1`。
-- `BlockFeatureExtractor` 当前输出 4 维统计量，主模型零填充到 MLP 所需的 28 维；后续可扩展为完整 28 维统计特征。
+- `BlockFeatureExtractor` 在主模型中计算完整的 `4+16+8=28` 维特征，不再补零：4 维基础统计、16 维四邻域统计差异、8 维边界结构差异。缺失邻居仍以零表示。
+- RGB 输入范围为 `[0,1]`。统计计算使用 FP32；结构响应除以 32、标准差乘以 2、熵除以 `log2(num_levels)`、边界法向梯度差除以 2，邻域差异基于归一化后的基础统计计算。外部传入的 `block_features` 必须遵循同样的列顺序与尺度。
+- Selected 解码器将 `[B,N1,768]` RoPE 特征投影为 128 通道，广播相加到局部 CNN 特征后进行块内 Transformer 解码。硬 top-k 索引仍不可微，路由器依赖路由监督和保留率损失。
+- 本次特征尺度及 Selected 解码器参数已变化，旧 checkpoint 不再严格兼容，建议重新训练。
+
+P1 回归测试：
+
+```bash
+python -m unittest discover -s tests -p 'test_p1_features.py' -v
+```
 - DynamicViT 的动态 `torch.topk` 在部分 ONNX Runtime 版本中对动态 K 的支持有限；部署时可改为固定最大 Token 数并配合有效 Mask，或将 K 作为显式输入。

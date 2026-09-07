@@ -5,3 +5,5 @@ checkpoints
 tests
 outputs
 __pycache__/
+*.pyc
+

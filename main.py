@@ -6,7 +6,6 @@ from typing import Optional
 
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 
 from models.cnn_base import CNNBase
 from models.dynamic_vit import RoPEAttention, TokenSelector
@@ -23,8 +22,8 @@ class EdgeDynamicViT(nn.Module):
 
     def __init__(self, keep_ratio: float = 0.3, stats_dim: int = 28) -> None:
         super().__init__()
-        if stats_dim < 4:
-            raise ValueError("stats_dim must be at least 4")
+        if stats_dim != 28:
+            raise ValueError("stats_dim must be 28 (4 base + 24 neighborhood features)")
         self.stats_dim = stats_dim
         self.patching = ImagePatchingRect(patch_height=64, patch_width=32)
         self.block_extractor = BlockFeatureExtractor()
@@ -53,8 +52,8 @@ class EdgeDynamicViT(nn.Module):
         coords = torch.stack((grid_x, grid_y), dim=-1).reshape(1, -1, 2)
         return coords.expand(batch_size, -1, -1)
 
-    def _prepare_block_features(self, patches: Tensor, block_features: Optional[Tensor]) -> Tensor:
-        """Use supplied 28D statistics or pad the four current statistics."""
+    def _prepare_block_features(self, patches: Tensor, block_features: Optional[Tensor], batch_size: int, patch_grid: tuple[int, int]) -> Tensor:
+        """Use supplied normalized statistics or compute all 28 columns."""
         if block_features is not None:
             if block_features.shape != (patches.shape[0], self.stats_dim):
                 raise ValueError(
@@ -62,8 +61,7 @@ class EdgeDynamicViT(nn.Module):
                     f"({patches.shape[0]}, {self.stats_dim}), got {tuple(block_features.shape)}"
                 )
             return block_features
-        basic_features = self.block_extractor(patches)
-        return F.pad(basic_features, (0, self.stats_dim - basic_features.shape[-1]))
+        return self.block_extractor(patches, batch_size=batch_size, grid_size=patch_grid)
 
     @staticmethod
     def _gather_patches(patches: Tensor, indices: Tensor, batch_size: int, patch_count: int) -> Tensor:
@@ -115,7 +113,7 @@ class EdgeDynamicViT(nn.Module):
         coords = self._make_patch_coords(batch_size, patch_grid, images.device, images.dtype)
 
         cnn_features = self.cnn_base(patches, patch_grid)
-        statistics = self._prepare_block_features(patches, block_features)
+        statistics = self._prepare_block_features(patches, block_features, batch_size, patch_grid)
         mlp_features = self.mlp_base(statistics, patch_grid)
         fused_features = self.feature_fusion(cnn_features, mlp_features)
 
@@ -130,7 +128,7 @@ class EdgeDynamicViT(nn.Module):
         selected_patches = self._gather_patches(
             patches, selected_indices, batch_size, patch_count
         )
-        selected_masks = self.selected_decoder(selected_patches)
+        selected_masks = self.selected_decoder(selected_patches, selected_features)
 
         remaining_features = fused_features.gather(
             1, remaining_indices[..., None].expand(-1, -1, fused_features.shape[-1])

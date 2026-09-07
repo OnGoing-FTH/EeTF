@@ -7,6 +7,8 @@ spatially adjacent patches from the same source image.
 
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
@@ -31,6 +33,12 @@ class BlockFeatureExtractor(nn.Module):
     - columns 20--27: boundary intensity discontinuity and boundary normal-
       gradient discontinuity for ``(up, down, left, right)``, two values per
       direction.
+
+    For RGB inputs in [0, 1], fixed scaling keeps columns in [0, 1]:
+    structure difference / 32, standard deviation * 2, entropy / log2(L),
+    and boundary normal-gradient difference / 2. Homogeneity and boundary
+    intensity keep their original scales. Neighbor differences use scaled
+    base features. Statistics use float32 even under autocast.
 
     Missing neighbors at image-grid borders are represented by zero values.
     Patches from different source images are never treated as neighbors.
@@ -84,12 +92,15 @@ class BlockFeatureExtractor(nn.Module):
         return (grayscale - minimum) / (maximum - minimum + self.eps)
 
     def _structure_tensor_difference(self, grayscale: Tensor) -> Tensor:
-        grad_x = F.conv2d(grayscale, self.sobel_x.to(dtype=grayscale.dtype), padding=1)
-        grad_y = F.conv2d(grayscale, self.sobel_y.to(dtype=grayscale.dtype), padding=1)
+        padded = F.pad(grayscale, (1, 1, 1, 1), mode="replicate")
+        grad_x = F.conv2d(padded, self.sobel_x.to(dtype=grayscale.dtype))
+        grad_y = F.conv2d(padded, self.sobel_y.to(dtype=grayscale.dtype))
         j_xx = grad_x.square().mean(dim=(-2, -1))
         j_yy = grad_y.square().mean(dim=(-2, -1))
         j_xy = (grad_x * grad_y).mean(dim=(-2, -1))
-        return torch.sqrt((j_xx - j_yy).square() + 4.0 * j_xy.square() + self.eps).squeeze(1)
+        # Sobel components are bounded by 4, so trace(J) <= 32.
+        magnitude = torch.sqrt((j_xx - j_yy).square() + 4.0 * j_xy.square() + self.eps)
+        return ((magnitude - math.sqrt(self.eps)).clamp_min(0) / 32.0).squeeze(1)
 
     def _quantize(self, normalized: Tensor) -> Tensor:
         return normalized.mul(self.num_levels - 1).round().long().squeeze(1)
@@ -127,9 +138,9 @@ class BlockFeatureExtractor(nn.Module):
         features = torch.stack(
             (
                 self._structure_tensor_difference(grayscale),
-                grayscale.std(dim=(-2, -1), unbiased=False).squeeze(1),
+                grayscale.std(dim=(-2, -1), unbiased=False).squeeze(1) * 2.0,
                 self._inverse_difference_moment(levels),
-                entropy.to(dtype=patches.dtype),
+                entropy / math.log2(self.num_levels),
             ),
             dim=1,
         )
@@ -189,7 +200,7 @@ class BlockFeatureExtractor(nn.Module):
             ).abs().mean(dim=-1)
         else:
             raise ValueError(f"unsupported direction: {direction}")
-        return intensity, gradient
+        return intensity, gradient / 2.0
 
     def forward(
         self,
@@ -205,7 +216,8 @@ class BlockFeatureExtractor(nn.Module):
             grid_size: Patch grid ``(grid_height, grid_width)``. Required with
                 ``batch_size``. Its product must equal ``N``.
         """
-        base_features, grayscale = self._base_features(patches)
+        with torch.autocast(device_type=patches.device.type, enabled=False):
+            base_features, grayscale = self._base_features(patches.float())
         if batch_size is None and grid_size is None:
             return base_features
         if batch_size is None or grid_size is None:
