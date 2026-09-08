@@ -55,6 +55,11 @@ def parse_args():
     parser.add_argument('--weight-decay', type=float, default=1e-4)
     parser.add_argument('--selection-threshold', type=float, default=0.5)
     parser.add_argument('--router-weight', type=float, default=1.0)
+    parser.add_argument('--router-boundary-weight', type=float, default=0.2)
+    parser.add_argument('--router-pairwise-weight', type=float, default=0.1)
+    parser.add_argument('--router-morphology-weight', type=float, default=0.1)
+    parser.add_argument('--router-boundary-margin', type=float, default=0.1)
+    parser.add_argument('--router-pair-margin', type=float, default=0.2)
     parser.add_argument('--num-workers', type=int, default=0)
     parser.add_argument('--run-dir', '--checkpoint-dir', dest='run_dir', default='runs/train', help='parent directory for timestamped training runs')
     parser.add_argument('--resume', default=None)
@@ -130,9 +135,15 @@ def main():
     for epoch in range(start_epoch, args.epochs):
         stage = stage_for_epoch(epoch, args.routing_epochs, args.frozen_epochs)
         configure_stage(model, optimizer, stage, args.learning_rate, args.finetune_lr_multiplier)
+        loss_args = dict(router_weight=args.router_weight,
+                          boundary_weight=args.router_boundary_weight,
+                          pairwise_weight=args.router_pairwise_weight,
+                          morphology_weight=args.router_morphology_weight,
+                          boundary_margin=args.router_boundary_margin,
+                          pair_margin=args.router_pair_margin)
         training = train_one_epoch(model, train_loader, optimizer, loss_fn, device,
-                                   stage=stage, scaler=scaler, router_weight=args.router_weight)
-        validation = validate(model, val_loader, loss_fn, device, stage=stage, router_weight=args.router_weight)
+                                   stage=stage, scaler=scaler, **loss_args)
+        validation = validate(model, val_loader, loss_fn, device, stage=stage, **loss_args)
         metric = 'route_f1' if stage == 'routing' else 'foreground_f1'
         improved = validation[metric] > best[metric]
         best[metric] = max(best[metric], validation[metric])
@@ -153,6 +164,8 @@ def main():
         if improved:
             torch.save(state, destination / ('best_router.pt' if stage == 'routing' else 'best.pt'))
         print(f'epoch={epoch + 1}/{args.epochs} stage={stage} train_loss={training["loss"]:.4f} '
+              f'ce={training.get("router_ce_loss", 0.0):.4f} pair={training.get("router_pairwise_loss", 0.0):.4f} '
+              f'boundary={training.get("router_boundary_loss", 0.0):.4f} morphology={training.get("router_morphology_loss", 0.0):.4f} '
               f'val_loss={validation["loss"]:.4f} {metric}={validation[metric]:.4f} '
               f'selected_fraction={validation["selected_fraction"]:.4f}', flush=True)
 

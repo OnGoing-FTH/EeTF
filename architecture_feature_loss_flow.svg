@@ -1,207 +1,30 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1450" viewBox="0 0 2400 1450" role="img" aria-labelledby="title desc">
-  <title id="title">EeTF 模型整体结构图：特征流与损失计算</title>
-  <desc id="desc">展示图像和标签输入、Patch 切分、CNN 与统计特征双路编码、特征融合、DynamicViT 路由、selected 和 remaining 双分支解码、掩码回填，以及像素、路由和保留率损失。</desc>
-  <defs>
-    <style>
-      .bg { fill: #f8fafc; }
-      .title { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 34px; font-weight: 700; fill: #172033; }
-      .subtitle { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 18px; fill: #526174; }
-      .section { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 19px; font-weight: 700; fill: #334155; letter-spacing: 0; }
-      .box-title { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 20px; font-weight: 700; fill: #172033; text-anchor: middle; }
-      .box-text { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 16px; fill: #344257; text-anchor: middle; }
-      .small { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 14px; fill: #526174; text-anchor: middle; }
-      .flow-label { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 14px; font-weight: 700; fill: #245f73; text-anchor: middle; }
-      .loss-label { font-family: Arial, 'Noto Sans CJK SC', sans-serif; font-size: 14px; font-weight: 700; fill: #a33c2b; text-anchor: middle; }
-      .group { fill: #ffffff; stroke: #d5dee9; stroke-width: 1.5; }
-      .input { fill: #e7f5f2; stroke: #369a8d; stroke-width: 2; }
-      .feature { fill: #eaf3fb; stroke: #3979a9; stroke-width: 2; }
-      .route { fill: #f2edfb; stroke: #7957ae; stroke-width: 2; }
-      .decode { fill: #fff4e7; stroke: #c77821; stroke-width: 2; }
-      .output { fill: #eaf7e8; stroke: #4b9460; stroke-width: 2; }
-      .label { fill: #fff0ef; stroke: #c45a52; stroke-width: 2; }
-      .loss { fill: #fff8e8; stroke: #bb8425; stroke-width: 2; }
-      .total { fill: #fdecef; stroke: #b44b67; stroke-width: 2.5; }
-      .arrow { fill: none; stroke: #397080; stroke-width: 2.4; marker-end: url(#arrow); }
-      .branch { fill: none; stroke: #6c5797; stroke-width: 2.4; marker-end: url(#arrowPurple); }
-      .supervise { fill: none; stroke: #c45a52; stroke-width: 2.2; stroke-dasharray: 8 6; marker-end: url(#arrowRed); }
-      .lossflow { fill: none; stroke: #b87922; stroke-width: 2.2; marker-end: url(#arrowOrange); }
-      .divider { stroke: #d5dee9; stroke-width: 1.5; stroke-dasharray: 6 8; }
-    </style>
-    <marker id="arrow" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#397080"/></marker>
-    <marker id="arrowPurple" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#6c5797"/></marker>
-    <marker id="arrowRed" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#c45a52"/></marker>
-    <marker id="arrowOrange" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0,0 L10,3 L0,6 Z" fill="#b87922"/></marker>
-  </defs>
-
-  <rect class="bg" width="2400" height="1450"/>
-  <text x="80" y="66" class="title">EeTF：稀疏边缘分割模型整体结构</text>
-  <text x="80" y="98" class="subtitle">仅包含模块、张量维度、特征流与损失计算 ｜ Patch size = 64 x 32 ｜ B = 1</text>
-
-  <rect x="60" y="135" width="2240" height="690" rx="8" class="group"/>
-  <text x="88" y="170" class="section">前向特征流</text>
-  <line x1="60" y1="192" x2="2300" y2="192" class="divider"/>
-
-  <rect x="90" y="285" width="175" height="108" rx="7" class="input"/>
-  <text x="177" y="322" class="box-title">输入图像</text>
-  <text x="177" y="352" class="box-text">images</text>
-  <text x="177" y="377" class="small">[B, 3, H, W]</text>
-
-  <rect x="325" y="270" width="195" height="138" rx="7" class="input"/>
-  <text x="422" y="307" class="box-title">ImagePatchingRect</text>
-  <text x="422" y="337" class="box-text">非重叠 Patch 切分</text>
-  <text x="422" y="365" class="small">Patch: 64 x 32</text>
-  <text x="422" y="388" class="small">[B*N, 3, 64, 32]</text>
-
-  <path d="M265 339 H325" class="arrow"/>
-  <text x="295" y="326" class="flow-label">图像</text>
-
-  <rect x="585" y="224" width="220" height="148" rx="7" class="feature"/>
-  <text x="695" y="259" class="box-title">CNNBase</text>
-  <text x="695" y="288" class="box-text">5-stage CNN</text>
-  <text x="695" y="315" class="small">64 x 16 x 8 = 8192</text>
-  <text x="695" y="340" class="small">[B, N, 8192]</text>
-
-  <rect x="585" y="442" width="220" height="158" rx="7" class="feature"/>
-  <text x="695" y="477" class="box-title">BlockFeatureExtractor</text>
-  <text x="695" y="506" class="box-text">结构 / 标准差 / GLCM / 熵</text>
-  <text x="695" y="533" class="small">当前 4D 统计量，零填充至 28D</text>
-  <text x="695" y="558" class="small">[B*N, 28]</text>
-
-  <rect x="875" y="442" width="180" height="158" rx="7" class="feature"/>
-  <text x="965" y="477" class="box-title">MLPBase</text>
-  <text x="965" y="506" class="box-text">28 -> 32 -> ... -> 768</text>
-  <text x="965" y="535" class="small">统计 Token 投影</text>
-  <text x="965" y="560" class="small">[B, N, 768]</text>
-
-  <path d="M520 320 H585" class="arrow"/>
-  <path d="M520 357 V521 H585" class="arrow"/>
-  <path d="M805 521 H875" class="arrow"/>
-
-  <rect x="1120" y="300" width="210" height="152" rx="7" class="feature"/>
-  <text x="1225" y="337" class="box-title">FeatureFusion</text>
-  <text x="1225" y="366" class="box-text">CNN 投影 + MLP 特征相加</text>
-  <text x="1225" y="394" class="small">8192 -> 768</text>
-  <text x="1225" y="419" class="small">fused: [B, N, 768]</text>
-
-  <path d="M805 298 H1120" class="arrow"/>
-  <path d="M1055 521 H1085 V417 H1120" class="arrow"/>
-
-  <rect x="1395" y="250" width="240" height="250" rx="7" class="route"/>
-  <text x="1515" y="287" class="box-title">DynamicViT TokenSelector</text>
-  <text x="1515" y="317" class="box-text">Router: 768 -> 192 -> 2</text>
-  <text x="1515" y="345" class="small">keep_logits: [B, N, 2]</text>
-  <text x="1515" y="370" class="small">keep_probs: [B, N]</text>
-  <text x="1515" y="397" class="small">Top-K: K = max(1, floor(N * r))</text>
-  <text x="1515" y="424" class="small">selected_indices [B, K]</text>
-  <text x="1515" y="449" class="small">remaining_indices [B, N-K]</text>
-  <text x="1515" y="477" class="small">Patch 中心坐标: [B, N, 2]</text>
-
-  <path d="M1330 376 H1395" class="arrow"/>
-
-  <rect x="1705" y="220" width="230" height="142" rx="7" class="route"/>
-  <text x="1820" y="257" class="box-title">Selected Token Attention</text>
-  <text x="1820" y="287" class="box-text">LayerNorm + 2D-RoPE Attention</text>
-  <text x="1820" y="315" class="small">12 heads x 64 dims</text>
-  <text x="1820" y="340" class="small">[B, K, 768]</text>
-
-  <rect x="1705" y="456" width="230" height="112" rx="7" class="route"/>
-  <text x="1820" y="493" class="box-title">Remaining Features</text>
-  <text x="1820" y="523" class="box-text">按 remaining_indices Gather</text>
-  <text x="1820" y="548" class="small">[B, N-K, 768]</text>
-
-  <path d="M1635 322 H1705" class="branch"/>
-  <text x="1670" y="307" class="flow-label">selected</text>
-  <path d="M1635 433 H1668 V512 H1705" class="branch"/>
-  <text x="1670" y="495" class="flow-label">remaining</text>
-
-  <rect x="2005" y="220" width="230" height="142" rx="7" class="decode"/>
-  <text x="2120" y="257" class="box-title">SelectedPatchDecoder</text>
-  <text x="2120" y="287" class="box-text">原始 Patch + 局部 Transformer</text>
-  <text x="2120" y="315" class="small">细粒度解码</text>
-  <text x="2120" y="340" class="small">[B*K, 1, 64, 32]</text>
-
-  <rect x="2005" y="456" width="230" height="112" rx="7" class="decode"/>
-  <text x="2120" y="493" class="box-title">RemainingPatchDecoder</text>
-  <text x="2120" y="523" class="box-text">768 -> 512 -> 32 x 16 -> 上采样</text>
-  <text x="2120" y="548" class="small">[B, N-K, 1, 64, 32]</text>
-
-  <path d="M1935 291 H2005" class="arrow"/>
-  <path d="M520 360 V640 H1970 V331 H2005" class="branch"/>
-  <text x="1040" y="630" class="flow-label">selected_indices Gather 原始 Patch</text>
-  <path d="M1935 512 H2005" class="arrow"/>
-
-  <rect x="960" y="675" width="310" height="106" rx="7" class="output"/>
-  <text x="1115" y="712" class="box-title">按原始 Patch 索引回填与合并</text>
-  <text x="1115" y="741" class="box-text">selected + remaining mask logits</text>
-  <text x="1115" y="766" class="small">[B, 1, H, W]</text>
-
-  <path d="M2120 362 V635 H1270 V710" class="arrow"/>
-  <path d="M2120 568 V655 H1270 V735" class="arrow"/>
-
-  <rect x="1385" y="675" width="250" height="106" rx="7" class="output"/>
-  <text x="1510" y="712" class="box-title">mask_logits</text>
-  <text x="1510" y="741" class="box-text">完整像素级边缘预测</text>
-  <text x="1510" y="766" class="small">[B, 1, H, W]</text>
-  <path d="M1270 728 H1385" class="arrow"/>
-
-  <rect x="60" y="875" width="2240" height="500" rx="8" class="group"/>
-  <text x="88" y="910" class="section">监督标签与损失计算</text>
-  <line x1="60" y1="932" x2="2300" y2="932" class="divider"/>
-
-  <rect x="100" y="1030" width="210" height="110" rx="7" class="label"/>
-  <text x="205" y="1067" class="box-title">边缘标签 masks</text>
-  <text x="205" y="1097" class="box-text">灰度软标签</text>
-  <text x="205" y="1122" class="small">[B, 1, H, W], [0, 1]</text>
-
-  <rect x="410" y="985" width="260" height="142" rx="7" class="loss"/>
-  <text x="540" y="1022" class="box-title">SparseEdgeLoss</text>
-  <text x="540" y="1051" class="box-text">Foreground-weighted BCE</text>
-  <text x="540" y="1077" class="box-text">+ Dice Loss</text>
-  <text x="540" y="1105" class="small">pixel_loss</text>
-
-  <path d="M310 1085 H410" class="supervise"/>
-  <path d="M1510 781 V860 H540 V985" class="supervise"/>
-  <text x="1025" y="850" class="loss-label">mask_logits</text>
-
-  <rect x="410" y="1190" width="260" height="132" rx="7" class="label"/>
-  <text x="540" y="1227" class="box-title">pool_patch_targets</text>
-  <text x="540" y="1256" class="box-text">MaxPool2d(64 x 32)</text>
-  <text x="540" y="1284" class="box-text">阈值化 Patch 占用标签</text>
-  <text x="540" y="1309" class="small">patch_targets: [B, N]</text>
-  <path d="M205 1140 V1256 H410" class="supervise"/>
-
-  <rect x="775" y="1190" width="260" height="132" rx="7" class="loss"/>
-  <text x="905" y="1227" class="box-title">Router Loss</text>
-  <text x="905" y="1256" class="box-text">类别均衡 Cross Entropy</text>
-  <text x="905" y="1284" class="box-text">Keep / Drop 分类监督</text>
-  <text x="905" y="1309" class="small">router_loss</text>
-  <path d="M670 1256 H775" class="supervise"/>
-  <path d="M1515 500 V1160 H905 V1190" class="supervise"/>
-  <text x="1210" y="1151" class="loss-label">keep_logits: [B, N, 2]</text>
-
-  <rect x="1135" y="1190" width="260" height="132" rx="7" class="loss"/>
-  <text x="1265" y="1227" class="box-title">Keep-ratio Loss</text>
-  <text x="1265" y="1256" class="box-text">MSE(mean(keep_probs), r)</text>
-  <text x="1265" y="1284" class="box-text">r = keep_ratio</text>
-  <text x="1265" y="1309" class="small">ratio_loss</text>
-  <path d="M1515 500 V1135 H1265 V1190" class="lossflow"/>
-  <text x="1395" y="1125" class="flow-label">keep_probs: [B, N]</text>
-
-  <rect x="1600" y="1055" width="555" height="185" rx="7" class="total"/>
-  <text x="1877" y="1095" class="box-title">总损失 L_total</text>
-  <text x="1877" y="1130" class="box-text">pixel_loss + router_weight x router_loss</text>
-  <text x="1877" y="1160" class="box-text">+ ratio_weight x ratio_loss</text>
-  <text x="1877" y="1194" class="small">pixel_loss = Weighted BCE + Dice</text>
-  <text x="1877" y="1218" class="small">ratio_loss = MSE(mean(keep_probs), keep_ratio)</text>
-
-  <path d="M670 1055 H1600" class="lossflow"/>
-  <path d="M1035 1256 H1475 V1160 H1600" class="lossflow"/>
-  <path d="M1395 1256 H1510 V1190 H1600" class="lossflow"/>
-
-  <line x1="90" y1="1405" x2="125" y2="1405" class="arrow"/>
-  <text x="215" y="1410" class="small">实线：图像 / 特征 / 预测流</text>
-  <line x1="510" y1="1405" x2="545" y2="1405" class="supervise"/>
-  <text x="665" y="1410" class="small">虚线：标签监督流</text>
-  <line x1="930" y1="1405" x2="965" y2="1405" class="lossflow"/>
-  <text x="1090" y="1410" class="small">橙色：损失聚合流</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="2400" height="1550" viewBox="0 0 2400 1550" role="img" aria-labelledby="title desc">
+<title id="title">EeTF 当前架构、特征流与三阶段损失</title><desc id="desc">概率阈值动态选块、双分支稀疏边缘分割和三阶段训练损失。</desc>
+<defs><style>
+*{font-family:Arial,'Noto Sans CJK SC',sans-serif}.bg{fill:#f8fafc}.title{font-size:34px;font-weight:700;fill:#172033}.sub{font-size:18px;fill:#526174}.sec{font-size:20px;font-weight:700;fill:#334155}.t{font-size:19px;font-weight:700;fill:#172033;text-anchor:middle}.x{font-size:16px;fill:#344257;text-anchor:middle}.s{font-size:14px;fill:#526174;text-anchor:middle}.fl{font-size:14px;font-weight:700;fill:#245f73;text-anchor:middle}.ll{font-size:14px;font-weight:700;fill:#a33c2b;text-anchor:middle}.g{fill:#fff;stroke:#d5dee9;stroke-width:1.5}.i{fill:#e7f5f2;stroke:#369a8d;stroke-width:2}.f{fill:#eaf3fb;stroke:#3979a9;stroke-width:2}.r{fill:#f2edfb;stroke:#7957ae;stroke-width:2}.d{fill:#fff4e7;stroke:#c77821;stroke-width:2}.o{fill:#eaf7e8;stroke:#4b9460;stroke-width:2}.y{fill:#fff0ef;stroke:#c45a52;stroke-width:2}.l{fill:#fff8e8;stroke:#bb8425;stroke-width:2}.z{fill:#fdecef;stroke:#b44b67;stroke-width:2.5}.a{fill:none;stroke:#397080;stroke-width:2.4;marker-end:url(#a)}.b{fill:none;stroke:#6c5797;stroke-width:2.4;marker-end:url(#p)}.q{fill:none;stroke:#c45a52;stroke-width:2.2;stroke-dasharray:8 6;marker-end:url(#q)}.w{fill:none;stroke:#b87922;stroke-width:2.2;marker-end:url(#w)}.di{stroke:#d5dee9;stroke-width:1.5;stroke-dasharray:6 8}
+</style><marker id="a" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0 0 10 3 0 6Z" fill="#397080"/></marker><marker id="p" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0 0 10 3 0 6Z" fill="#6c5797"/></marker><marker id="q" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0 0 10 3 0 6Z" fill="#c45a52"/></marker><marker id="w" markerWidth="10" markerHeight="10" refX="9" refY="3" orient="auto"><path d="M0 0 10 3 0 6Z" fill="#b87922"/></marker></defs>
+<rect class="bg" width="2400" height="1550"/><text x="70" y="60" class="title">EeTF：稀疏边缘分割模型（当前代码）</text><text x="70" y="92" class="sub">完整 28D 统计特征 ｜ 概率阈值选块 ｜ B=1 ｜ 三阶段训练</text>
+<rect x="50" y="125" width="2300" height="760" rx="8" class="g"/><text x="78" y="160" class="sec">前向特征流</text><line x1="50" y1="180" x2="2350" y2="180" class="di"/>
+<rect x="80" y="300" width="180" height="105" rx="7" class="i"/><text x="170" y="338" class="t">输入图像</text><text x="170" y="367" class="x">images</text><text x="170" y="390" class="s">[B,3,H,W]</text>
+<rect x="330" y="275" width="205" height="155" rx="7" class="i"/><text x="432" y="312" class="t">ImagePatchingRect</text><text x="432" y="342" class="x">unfold 无重叠切块</text><text x="432" y="370" class="s">Patch = 64 × 32</text><text x="432" y="398" class="s">[B×N,3,64,32]</text><path d="M260 352H330" class="a"/>
+<rect x="600" y="215" width="230" height="150" rx="7" class="f"/><text x="715" y="252" class="t">CNNBase</text><text x="715" y="282" class="x">局部视觉特征</text><text x="715" y="311" class="s">末端 [B×N,64,16,8]</text><text x="715" y="338" class="s">展平 [B,N,8192]</text>
+<rect x="600" y="475" width="230" height="175" rx="7" class="f"/><text x="715" y="512" class="t">BlockFeatureExtractor</text><text x="715" y="542" class="x">结构 / std / GLCM / 熵</text><text x="715" y="572" class="s">4 + 16 + 8 = 28D</text><text x="715" y="600" class="s">FP32，replicate padding</text><text x="715" y="628" class="s">[B×N,28]</text>
+<rect x="890" y="475" width="190" height="175" rx="7" class="f"/><text x="985" y="512" class="t">MLPBase</text><text x="985" y="542" class="x">28→32→64→128</text><text x="985" y="570" class="x">→256→512→768</text><text x="985" y="602" class="s">[B,N,768]</text>
+<path d="M535 330H600" class="a"/><path d="M535 380V560H600" class="a"/><path d="M830 560H890" class="a"/>
+<rect x="1150" y="300" width="220" height="155" rx="7" class="f"/><text x="1260" y="338" class="t">FeatureFusion</text><text x="1260" y="368" class="x">CNN 投影 + MLP 相加</text><text x="1260" y="398" class="s">8192→768</text><text x="1260" y="426" class="s">fused [B,N,768]</text><path d="M830 290H1150" class="a"/><path d="M1080 560H1120V420H1150" class="a"/>
+<rect x="1435" y="245" width="255" height="285" rx="7" class="r"/><text x="1562" y="282" class="t">TokenSelector / Router</text><text x="1562" y="312" class="x">768→192→2</text><text x="1562" y="342" class="s">keep_logits [B,N,2]</text><text x="1562" y="370" class="s">keep_probs [B,N]</text><text x="1562" y="405" class="x">p ≥ threshold → selected</text><text x="1562" y="433" class="x">p &lt; threshold → remaining</text><text x="1562" y="466" class="s">数量不固定，支持空分支</text><text x="1562" y="496" class="s">indices 与 coords 动态生成</text><path d="M1370 375H1435" class="a"/>
+<rect x="1760" y="210" width="250" height="170" rx="7" class="r"/><text x="1885" y="248" class="t">Selected Attention</text><text x="1885" y="278" class="x">LayerNorm + 2D-RoPE</text><text x="1885" y="308" class="s">12 heads × 64 dims</text><text x="1885" y="338" class="s">[B,N1,768]</text><path d="M1690 330H1760" class="b"/><text x="1725" y="315" class="fl">selected</text>
+<rect x="1760" y="490" width="250" height="120" rx="7" class="r"/><text x="1885" y="528" class="t">Remaining Features</text><text x="1885" y="558" class="x">按 remaining_indices gather</text><text x="1885" y="588" class="s">[B,N2,768]</text><path d="M1690 455H1725V550H1760" class="b"/><text x="1725" y="535" class="fl">remaining</text>
+<rect x="2080" y="210" width="220" height="170" rx="7" class="d"/><text x="2190" y="248" class="t">Selected Decoder</text><text x="2190" y="278" class="x">CNN + context(768→128)</text><text x="2190" y="308" class="x">块内 Transformer</text><text x="2190" y="338" class="s">[B×N1,1,64,32]</text><path d="M2010 295H2080" class="a"/>
+<rect x="2080" y="490" width="220" height="120" rx="7" class="d"/><text x="2190" y="528" class="t">Remaining Decoder</text><text x="2190" y="558" class="x">768→512→32×16</text><text x="2190" y="588" class="s">上采样 [B×N2,1,64,32]</text><path d="M2010 550H2080" class="a"/>
+<path d="M535 400V745H2050V345H2080" class="b"/><text x="1280" y="730" class="fl">selected 原始 Patch gather</text>
+<rect x="1110" y="735" width="300" height="100" rx="7" class="o"/><text x="1260" y="772" class="t">merge_patch_logits</text><text x="1260" y="802" class="x">按原始索引回填 selected + remaining</text><text x="1260" y="825" class="s">mask_logits [B,1,H,W]</text><path d="M2190 380V680H1410V760" class="a"/><path d="M2190 610V700H1410V800" class="a"/>
+<rect x="50" y="935" width="2300" height="535" rx="8" class="g"/><text x="78" y="970" class="sec">标签、阶段损失与训练状态</text><line x1="50" y1="990" x2="2350" y2="990" class="di"/>
+<rect x="90" y="1080" width="220" height="115" rx="7" class="y"/><text x="200" y="1118" class="t">edge mask</text><text x="200" y="1148" class="x">8-bit 灰度软标签 /255</text><text x="200" y="1177" class="s">[B,1,H,W]</text>
+<rect x="380" y="1035" width="300" height="155" rx="7" class="l"/><text x="530" y="1072" class="t">SparseEdgeLoss</text><text x="530" y="1103" class="x">Weighted BCE + Dice</text><text x="530" y="1133" class="x">保留灰度像素目标</text><text x="530" y="1163" class="s">pixel_loss</text><path d="M310 1135H380" class="q"/><path d="M1260 835V1015H530V1035" class="q"/>
+<rect x="380" y="1270" width="300" height="130" rx="7" class="y"/><text x="530" y="1307" class="t">pool_patch_targets</text><text x="530" y="1337" class="x">label &gt; 0 的硬占用判断</text><text x="530" y="1367" class="s">patch_targets [B,N]</text><path d="M200 1195V1335H380" class="q"/>
+<rect x="790" y="1270" width="300" height="130" rx="7" class="l"/><text x="940" y="1307" class="t">Router Loss</text><text x="940" y="1337" class="x">Weighted CE + 相邻关系</text><text x="940" y="1360" class="x">+ 结构边界 + 孤立结构</text><text x="940" y="1385" class="s">keep_probs / patch_targets 网格监督</text><path d="M680 1335H790" class="q"/><path d="M1560 530V1235H940V1270" class="q"/>
+<rect x="1190" y="1050" width="430" height="220" rx="7" class="z"/><text x="1405" y="1090" class="t">三阶段训练调度</text><text x="1405" y="1125" class="x">1 routing：仅 Router/CNN/MLP/融合</text><text x="1405" y="1158" class="x">仅 route_loss，不执行解码</text><text x="1405" y="1195" class="x">2 segmentation：冻结选块模块</text><text x="1405" y="1228" class="x">仅 pixel_loss，保持 eval</text><text x="1405" y="1260" class="x">3 finetune：全量联合，Router 低 LR</text>
+<rect x="1740" y="1050" width="510" height="220" rx="7" class="z"/><text x="1995" y="1090" class="t">当前总损失</text><text x="1995" y="1130" class="x">routing：L = router_loss</text><text x="1995" y="1165" class="x">segmentation：L = pixel_loss</text><text x="1995" y="1200" class="x">finetune：L = pixel_loss</text><text x="1995" y="1235" class="x">+ router_weight × router_loss</text><text x="1995" y="1265" class="s">不再使用 keep-ratio / ratio_loss</text><text x="1995" y="1290" class="s">结构项仅惩罚标签不一致孤立预测</text><path d="M680 1110H1740" class="w"/><path d="M1090 1335H1660V1180H1740" class="w"/><path d="M1620 1160H1740" class="w"/>
+<line x1="90" y1="1430" x2="125" y2="1430" class="a"/><text x="220" y="1435" class="s">实线：图像 / 特征 / 预测</text><line x1="510" y1="1430" x2="545" y2="1430" class="q"/><text x="680" y="1435" class="s">红色虚线：标签监督</text><line x1="930" y1="1430" x2="965" y2="1430" class="w"/><text x="1110" y="1435" class="s">橙色：损失聚合</text>
 </svg>

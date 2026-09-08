@@ -9,7 +9,7 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-METRICS = ('loss', 'router_loss', 'pixel_loss', 'route_f1', 'foreground_f1', 'selected_fraction')
+METRICS = ('loss', 'router_loss', 'router_ce_loss', 'router_pairwise_loss', 'router_boundary_loss', 'router_morphology_loss', 'pixel_loss', 'route_f1', 'foreground_f1', 'selected_fraction')
 FIELDS = ['epoch', 'stage'] + [f'{split}_{key}' for key in METRICS for split in ('train', 'val')]
 
 
@@ -35,7 +35,7 @@ def metric_row(epoch, stage, training, validation):
     row = dict(epoch=epoch, stage=stage)
     for split, values in (('train', training), ('val', validation)):
         for key in METRICS:
-            inactive = (stage == 'routing' and key in ('pixel_loss', 'foreground_f1')) or (stage == 'segmentation' and key == 'router_loss')
+            inactive = (stage == 'routing' and key in ('pixel_loss', 'foreground_f1')) or (stage == 'segmentation' and key.startswith('router_'))
             row[f'{split}_{key}'] = None if inactive else values.get(key)
     return row
 

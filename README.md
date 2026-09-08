@@ -72,11 +72,15 @@ Router 使用独立选块监督，CNN/MLP/融合可经像素特征路径更新�
 
 | 阶段 | 默认轮次 | 可训练模块 | 损失 |
 |---|---|---|---|
-| routing | 1–20 | CNN、统计 MLP、融合、Router | 类别加权选块交叉熵 |
+| routing | 1–20 | CNN、统计 MLP、融合、Router | 加权 CE + 相邻关系 + 结构边界 + 孤立结构损失 |
 | segmentation | 21–40 | RoPE、两个解码器 | Weighted BCE + Dice |
 | finetune | 41–100 | 全部模块 | 像素损失 + router_weight × 选块损失 |
 
-选块预训练不执行 RoPE/解码器。冻结阶段将选块模块设为 eval 并关闭梯度，
+选块预训练不执行 RoPE/解码器。Router Loss 为：
+`L_router = L_weighted_CE + λ_pair L_pairwise + λ_boundary L_boundary + λ_morph L_morphology`。
+其中相邻 Patch 同标签时约束概率接近、异标签时约束概率分离；边界项将概率推离选块阈值；
+形态学项只惩罚预测类别与标签不一致且四邻域孤立的 Patch。所有结构项作用于连续 keep 概率，
+因此可以反向传播到 Router。冻结阶段将选块模块设为 eval 并关闭梯度，
 包括冻结 BatchNorm 运行统计；解冻微调的选块模块学习率默认是解码器的 0.1 倍。
 阶段顺序连续衔接上一轮状态，不自动回滚到 best_router.pt。
 像素 BCE 的前景权重由非零标签支持区域计数决定，Dice 保留灰度软目标。
@@ -88,6 +92,9 @@ python train.py \
   --epochs 100 --routing-epochs 20 --frozen-epochs 20 \
   --selection-threshold 0.5 --learning-rate 1e-4 \
   --finetune-lr-multiplier 0.1 --router-weight 1.0 \
+  --router-boundary-weight 0.2 --router-pairwise-weight 0.1 \
+  --router-morphology-weight 0.1 --router-boundary-margin 0.1 \
+  --router-pair-margin 0.2 \
   --val-ratio 0.2 --seed 42 --run-dir runs/train
 ```
 
@@ -171,7 +178,7 @@ outputs/<时间编号>/
 └── contact_sheet.png
 ```
 
-每轮验证以 epoch 和阶段编号归属于本次训练 run。第一阶段每轮输出 Patch 二分类混淆矩阵：
+每轮验证以 epoch 和阶段编号归属于本次训练 run。第一阶段每轮输出 Patch 二分类混淆矩阵，并在训练日志中分别记录 CE、相邻关系、结构边界和孤立结构四项 Router 子损失：
 纵轴是真实类别，横轴是预测类别，类别顺序 Drop/Keep，计数布局 `[[TN,FP],[FN,TP]]`。
 另存按真实类别逐行归一化的矩阵，缺失类别显示为 0。
 

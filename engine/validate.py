@@ -8,7 +8,9 @@ from metrics import compute_sparse_edge_metrics
 
 
 @torch.inference_mode()
-def validate(model, loader, segmentation_loss, device, stage='finetune', router_weight=1.0):
+def validate(model, loader, segmentation_loss, device, stage='finetune', router_weight=1.0,
+             boundary_weight=0.2, pairwise_weight=0.1, morphology_weight=0.1,
+             boundary_margin=0.1, pair_margin=0.2):
     model.eval()
     totals = defaultdict(float)
     count = 0
@@ -17,8 +19,13 @@ def validate(model, loader, segmentation_loss, device, stage='finetune', router_
         images = batch['image'].to(device)
         masks = batch['mask'].to(device)
         outputs = model(images, labels=masks, routing_only=stage == 'routing')
-        loss, pixel, route = stage_loss(outputs, masks, segmentation_loss, stage, router_weight)
-        for name, value in (('loss', loss), ('pixel_loss', pixel), ('router_loss', route)):
+        outputs['selection_threshold'] = model.selector.selection_threshold
+        loss, pixel, route, terms = stage_loss(
+            outputs, masks, segmentation_loss, stage, router_weight,
+            boundary_weight, pairwise_weight, morphology_weight,
+            boundary_margin, pair_margin)
+        for name, value in (('loss', loss), ('pixel_loss', pixel), ('router_loss', route),
+                            *[(f'router_{key}_loss', value) for key, value in terms.items()]):
             totals[name] += value.item()
         predicted = outputs['keep_probs'] >= model.selector.selection_threshold
         target = outputs['patch_targets'].bool()
