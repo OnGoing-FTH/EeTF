@@ -6,4 +6,5 @@ tests
 outputs
 __pycache__/
 *.pyc
+runs/
 

@@ -1,73 +1,68 @@
-"""One-epoch training loop for sparse edge segmentation."""
-
-from __future__ import annotations
-
+"""Stage-specific optimization for routing and segmentation."""
 from collections import defaultdict
-from typing import Any
 
 import torch
-from torch import Tensor, nn
 from torch.nn import functional as F
-from torch.utils.data import DataLoader
-
-from losses.dynamic_loss import compute_dynamic_loss
+from metrics import compute_sparse_edge_metrics
 
 
-def router_loss(keep_logits: Tensor, patch_targets: Tensor) -> Tensor:
-    """Class-balanced Keep/Drop cross entropy for sparse positive patches."""
-    targets = patch_targets.long()
-    positive = targets.sum()
+def router_loss(keep_logits, patch_targets):
+    targets = patch_targets.long().reshape(-1)
+    positive = targets.sum().float()
     negative = targets.numel() - positive
-    class_weights = keep_logits.new_tensor([1.0, negative / positive.clamp_min(1)])
-    return F.cross_entropy(keep_logits.reshape(-1, 2), targets.reshape(-1), weight=class_weights)
+    # Both classes retain nonzero weights for all-positive/all-negative batches.
+    weights = torch.stack((positive.clamp_min(1), negative.clamp_min(1)))
+    weights = weights / weights.max()
+    return F.cross_entropy(keep_logits.float().reshape(-1, 2), targets, weight=weights)
 
 
-def train_one_epoch(
-    model: nn.Module,
-    loader: DataLoader[dict[str, Any]],
-    optimizer: torch.optim.Optimizer,
-    segmentation_loss: nn.Module,
-    device: torch.device,
-    keep_ratio: float,
-    scaler: torch.amp.GradScaler | None = None,
-    ratio_weight: float = 2.0,
-    router_weight: float = 1.0,
-) -> dict[str, float]:
-    """Optimize one epoch and return average scalar losses and keep ratio."""
+def stage_loss(outputs, masks, segmentation_loss, stage, router_weight=1.0):
+    if stage not in {"routing", "segmentation", "finetune"}:
+        raise ValueError(f"unknown stage: {stage}")
+    zero = masks.new_zeros(())
+    route = router_loss(outputs['keep_logits'], outputs['patch_targets']) if stage != 'segmentation' else zero
+    pixel = segmentation_loss(outputs['mask_logits'], masks) if stage != 'routing' else zero
+    total = route if stage == 'routing' else pixel + router_weight * route
+    return total, pixel, route
+
+
+def train_one_epoch(model, loader, optimizer, segmentation_loss, device,
+                    stage='finetune', scaler=None, router_weight=1.0):
+    model.set_stage(stage)
     model.train()
-    totals: defaultdict[str, float] = defaultdict(float)
-    sample_count = 0
-    amp_enabled = scaler is not None and device.type == "cuda"
-
+    totals = defaultdict(float)
+    count = 0
+    tp = fp = fn = 0
     for batch in loader:
-        images = batch["image"].to(device, non_blocking=True)
-        masks = batch["mask"].to(device, non_blocking=True)
+        images = batch['image'].to(device, non_blocking=True)
+        masks = batch['mask'].to(device, non_blocking=True)
         optimizer.zero_grad(set_to_none=True)
-        with torch.autocast(device_type=device.type, enabled=amp_enabled):
-            outputs = model(images, labels=masks)
-            pixel_loss = segmentation_loss(outputs["mask_logits"], masks)
-            route_loss = router_loss(outputs["keep_logits"], outputs["patch_targets"])
-            total_loss = compute_dynamic_loss(
-                pixel_loss + router_weight * route_loss,
-                outputs["keep_probs"],
-                target_ratio=keep_ratio,
-                lambda_ratio=ratio_weight,
-            )
-
+        with torch.autocast(device_type=device.type, enabled=scaler is not None and device.type == 'cuda'):
+            outputs = model(images, labels=masks, routing_only=stage == 'routing')
+            loss, pixel, route = stage_loss(outputs, masks, segmentation_loss, stage, router_weight)
+        if not torch.isfinite(loss):
+            raise FloatingPointError(f'non-finite {stage} loss')
         if scaler is None:
-            total_loss.backward()
+            loss.backward()
             optimizer.step()
         else:
-            scaler.scale(total_loss).backward()
+            scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-
-        totals["loss"] += total_loss.detach().item()
-        totals["pixel_loss"] += pixel_loss.detach().item()
-        totals["router_loss"] += route_loss.detach().item()
-        totals["mean_keep_probability"] += outputs["keep_probs"].detach().mean().item()
-        sample_count += 1
-
-    if sample_count == 0:
-        raise ValueError("training loader is empty")
-    return {name: value / sample_count for name, value in totals.items()}
+        for name, value in (('loss', loss), ('pixel_loss', pixel), ('router_loss', route)):
+            totals[name] += value.detach().item()
+        with torch.no_grad():
+            predicted = outputs['keep_probs'] >= model.selector.selection_threshold
+            target = outputs['patch_targets'].bool()
+            tp += (predicted & target).sum().item()
+            fp += (predicted & ~target).sum().item()
+            fn += (~predicted & target).sum().item()
+            totals['selected_fraction'] += predicted.float().mean().item()
+            if stage != 'routing':
+                totals['foreground_f1'] += compute_sparse_edge_metrics(outputs['mask_logits'].detach(), masks)['foreground_f1'].item()
+        count += 1
+    if not count:
+        raise ValueError('training loader is empty')
+    result = {key: value / count for key, value in totals.items()}
+    result['route_f1'] = 2 * tp / max(2 * tp + fp + fn, 1)
+    return result

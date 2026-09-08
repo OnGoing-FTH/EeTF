@@ -80,13 +80,13 @@ class RoPEAttention(nn.Module):
 
 
 class TokenSelector(nn.Module):
-    """Predict Keep/Drop logits and select the top-K patch tokens."""
+    """Predict Keep/Drop logits and partition B=1 tokens by probability."""
 
-    def __init__(self, d_model: int = 768, keep_ratio: float = 0.3, hidden_dim: int = 192) -> None:
+    def __init__(self, d_model: int = 768, selection_threshold: float = 0.5, hidden_dim: int = 192) -> None:
         super().__init__()
-        if not 0.0 < keep_ratio <= 1.0:
-            raise ValueError("keep_ratio must be in (0, 1]")
-        self.keep_ratio = keep_ratio
+        if not 0.0 <= selection_threshold <= 1.0:
+            raise ValueError("selection_threshold must be in [0, 1]")
+        self.selection_threshold = selection_threshold
         self.router = nn.Sequential(nn.LayerNorm(d_model), nn.Linear(d_model, hidden_dim), nn.GELU(), nn.Linear(hidden_dim, 2))
 
     def forward(
@@ -98,22 +98,13 @@ class TokenSelector(nn.Module):
         """Return selected tokens and the complementary remaining indices."""
         logits = self.router(x)
         keep_probs = logits.softmax(dim=-1)[..., 1]
-        scores = keep_probs
+        if x.shape[0] != 1:
+            raise ValueError("threshold selection requires B=1")
+        selected_mask = keep_probs >= self.selection_threshold
         if valid_mask is not None:
-            scores = scores.masked_fill(~valid_mask.bool(), -torch.inf)
-        token_count = x.shape[1]
-        keep_count = max(1, int(token_count * self.keep_ratio))
-        keep_count = min(keep_count, token_count)
-        if self.training:
-            sample = F.gumbel_softmax(logits, tau=1.0, hard=True, dim=-1)[..., 1]
-            scores = sample + scores.clamp_min(0.0) * 1e-6
-        _, indices = torch.topk(scores, k=keep_count, dim=1, largest=True, sorted=True)
+            selected_mask = selected_mask & valid_mask.bool()
+        indices = selected_mask[0].nonzero(as_tuple=True)[0].unsqueeze(0)
+        remaining_indices = (~selected_mask[0]).nonzero(as_tuple=True)[0].unsqueeze(0)
         selected_x = x.gather(1, indices.unsqueeze(-1).expand(-1, -1, x.shape[-1]))
         selected_coords = coords.gather(1, indices.unsqueeze(-1).expand(-1, -1, 2))
-        all_indices = torch.arange(token_count, device=x.device).expand(x.shape[0], -1)
-        selected_mask = torch.zeros_like(all_indices, dtype=torch.bool)
-        selected_mask.scatter_(1, indices, True)
-        remaining_indices = all_indices.masked_select(~selected_mask).reshape(
-            x.shape[0], token_count - keep_count
-        )
         return selected_x, selected_coords, logits, keep_probs, indices, remaining_indices

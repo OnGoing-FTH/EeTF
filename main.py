@@ -20,7 +20,7 @@ from utils.label_utils import pool_patch_targets
 class EdgeDynamicViT(nn.Module):
     """B=1 sparse patch segmentation model with selected and remaining branches."""
 
-    def __init__(self, keep_ratio: float = 0.3, stats_dim: int = 28) -> None:
+    def __init__(self, selection_threshold: float = 0.5, stats_dim: int = 28) -> None:
         super().__init__()
         if stats_dim != 28:
             raise ValueError("stats_dim must be 28 (4 base + 24 neighborhood features)")
@@ -30,12 +30,32 @@ class EdgeDynamicViT(nn.Module):
         self.cnn_base = CNNBase()
         self.mlp_base = MLPBase(input_dim=stats_dim)
         self.feature_fusion = FeatureFusion()
-        self.selector = TokenSelector(keep_ratio=keep_ratio)
+        self.selector = TokenSelector(selection_threshold=selection_threshold)
+        self.training_stage = "finetune"
         self.pre_attention_norm = nn.LayerNorm(768)
         self.attention = RoPEAttention(d_model=768, nheads=12)
         self.post_attention_norm = nn.LayerNorm(768)
         self.selected_decoder = SelectedPatchDecoder()
         self.remaining_decoder = RemainingPatchDecoder()
+
+    def routing_modules(self):
+        return (self.block_extractor, self.cnn_base, self.mlp_base, self.feature_fusion, self.selector)
+
+    def set_stage(self, stage: str) -> None:
+        if stage not in {"routing", "segmentation", "finetune"}:
+            raise ValueError(f"unknown stage: {stage}")
+        self.training_stage = stage
+        self.requires_grad_(stage != "routing")
+        for module in self.routing_modules():
+            module.requires_grad_(stage != "segmentation")
+        self.train(self.training)
+
+    def train(self, mode: bool = True):
+        super().train(mode)
+        if mode and self.training_stage == "segmentation":
+            for module in self.routing_modules():
+                module.eval()
+        return self
 
     @staticmethod
     def _make_patch_coords(
@@ -103,6 +123,7 @@ class EdgeDynamicViT(nn.Module):
         images: Tensor,
         labels: Optional[Tensor] = None,
         block_features: Optional[Tensor] = None,
+        routing_only: bool = False,
     ) -> dict[str, Tensor | tuple[int, int]]:
         """Run both patch branches and return the full-resolution mask logits."""
         if images.shape[0] != 1:
@@ -117,23 +138,32 @@ class EdgeDynamicViT(nn.Module):
         mlp_features = self.mlp_base(statistics, patch_grid)
         fused_features = self.feature_fusion(cnn_features, mlp_features)
 
+        if routing_only:
+            logits = self.selector.router(fused_features)
+            output = {"keep_logits": logits, "keep_probs": logits.softmax(-1)[..., 1], "patch_grid": patch_grid}
+            if labels is not None:
+                output["patch_targets"] = pool_patch_targets(labels, patch_grid)
+            return output
+
         selected_features, selected_coords, keep_logits, keep_probs, selected_indices, remaining_indices = self.selector(
             fused_features, coords
         )
-        selected_features = selected_features + self.attention(
-            self.pre_attention_norm(selected_features), selected_coords
-        )
-        selected_features = self.post_attention_norm(selected_features)
-
-        selected_patches = self._gather_patches(
-            patches, selected_indices, batch_size, patch_count
-        )
-        selected_masks = self.selected_decoder(selected_patches, selected_features)
+        if selected_indices.shape[1]:
+            selected_features = selected_features + self.attention(
+                self.pre_attention_norm(selected_features), selected_coords
+            )
+            selected_features = self.post_attention_norm(selected_features)
+            selected_patches = self._gather_patches(patches, selected_indices, batch_size, patch_count)
+            selected_masks = self.selected_decoder(selected_patches, selected_features)
+        else:
+            selected_masks = fused_features.new_empty(0, 1, 64, 32)
 
         remaining_features = fused_features.gather(
             1, remaining_indices[..., None].expand(-1, -1, fused_features.shape[-1])
         )
-        remaining_masks = self.remaining_decoder(remaining_features)
+        remaining_masks = (self.remaining_decoder(remaining_features) if remaining_indices.shape[1]
+                           else fused_features.new_empty(batch_size, 0, 1, 64, 32))
+        selected_masks = selected_masks.to(remaining_masks.dtype)
         full_mask_logits = self._merge_patch_masks(
             selected_masks, selected_indices, remaining_masks, remaining_indices, patch_grid
         )
@@ -159,7 +189,7 @@ class EdgeDynamicViT(nn.Module):
 
 if __name__ == "__main__":
     test_resolutions = ((768, 768), (512, 1024), (1024, 512))
-    model = EdgeDynamicViT(keep_ratio=0.3).eval()
+    model = EdgeDynamicViT(selection_threshold=0.5).eval()
 
     with torch.inference_mode():
         for height, width in test_resolutions:
