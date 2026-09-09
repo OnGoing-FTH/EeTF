@@ -60,6 +60,8 @@ def parse_args():
     parser.add_argument('--router-morphology-weight', type=float, default=0.1)
     parser.add_argument('--router-boundary-margin', type=float, default=0.1)
     parser.add_argument('--router-pair-margin', type=float, default=0.2)
+    parser.add_argument('--seg-cldice-weight', type=float, default=0.5)
+    parser.add_argument('--seg-cldice-iterations', type=int, default=10)
     parser.add_argument('--num-workers', type=int, default=0)
     parser.add_argument('--run-dir', '--checkpoint-dir', dest='run_dir', default='runs/train', help='parent directory for timestamped training runs')
     parser.add_argument('--resume', default=None)
@@ -68,6 +70,13 @@ def parse_args():
         parser.error('require routing-epochs >= 1, frozen-epochs >= 1 and epochs > their sum')
     if not 0 < args.finetune_lr_multiplier <= 1 or args.learning_rate <= 0 or args.router_weight <= 0:
         parser.error('require positive learning rate/router weight and finetune multiplier in (0,1]')
+    weights = (args.router_boundary_weight, args.router_pairwise_weight,
+               args.router_morphology_weight, args.seg_cldice_weight)
+    margins = (args.router_boundary_margin, args.router_pair_margin)
+    if any(value < 0 for value in weights + margins):
+        parser.error('structure loss weights and margins must be non-negative')
+    if args.seg_cldice_iterations < 1:
+        parser.error('clDice iterations must be >= 1')
     return args
 
 
@@ -140,7 +149,9 @@ def main():
                           pairwise_weight=args.router_pairwise_weight,
                           morphology_weight=args.router_morphology_weight,
                           boundary_margin=args.router_boundary_margin,
-                          pair_margin=args.router_pair_margin)
+                          pair_margin=args.router_pair_margin,
+                          cldice_weight=args.seg_cldice_weight,
+                          cldice_iterations=args.seg_cldice_iterations)
         training = train_one_epoch(model, train_loader, optimizer, loss_fn, device,
                                    stage=stage, scaler=scaler, **loss_args)
         validation = validate(model, val_loader, loss_fn, device, stage=stage, **loss_args)
@@ -166,7 +177,7 @@ def main():
         print(f'epoch={epoch + 1}/{args.epochs} stage={stage} train_loss={training["loss"]:.4f} '
               f'ce={training.get("router_ce_loss", 0.0):.4f} pair={training.get("router_pairwise_loss", 0.0):.4f} '
               f'boundary={training.get("router_boundary_loss", 0.0):.4f} morphology={training.get("router_morphology_loss", 0.0):.4f} '
-              f'val_loss={validation["loss"]:.4f} {metric}={validation[metric]:.4f} '
+              f'cldice={training.get("seg_cldice_loss", 0.0):.4f} val_loss={validation["loss"]:.4f} {metric}={validation[metric]:.4f} '
               f'selected_fraction={validation["selected_fraction"]:.4f}', flush=True)
 
 

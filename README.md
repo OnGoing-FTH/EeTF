@@ -29,6 +29,7 @@ models/feature_fusion.py         CNN 投影 + MLP → [B,N,768]
 models/dynamic_vit.py            阈值路由、2D-RoPE Attention
 models/patch_decoders.py         Selected/Remaining 双分支
 losses/sparse_segmentation_loss.py  加权 BCE + Dice
+losses/structural_segmentation_loss.py  Soft-clDice 骨架拓扑损失
 engine/train.py                  分阶段损失和单轮优化
 engine/validate.py               分阶段验证
 train.py                        阶段调度、checkpoint 保存和恢复
@@ -73,14 +74,21 @@ Router 使用独立选块监督，CNN/MLP/融合可经像素特征路径更新�
 | 阶段 | 默认轮次 | 可训练模块 | 损失 |
 |---|---|---|---|
 | routing | 1–20 | CNN、统计 MLP、融合、Router | 加权 CE + 相邻关系 + 结构边界 + 孤立结构损失 |
-| segmentation | 21–40 | RoPE、两个解码器 | Weighted BCE + Dice |
-| finetune | 41–100 | 全部模块 | 像素损失 + router_weight × 选块损失 |
+| segmentation | 21–40 | RoPE、两个解码器 | Weighted BCE + Dice + Soft-clDice |
+| finetune | 41–100 | 全部模块 | 分割结构损失 + router_weight × 选块损失 |
 
 选块预训练不执行 RoPE/解码器。Router Loss 为：
 `L_router = L_weighted_CE + λ_pair L_pairwise + λ_boundary L_boundary + λ_morph L_morphology`。
 其中相邻 Patch 同标签时约束概率接近、异标签时约束概率分离；边界项将概率推离选块阈值；
 形态学项只惩罚预测类别与标签不一致且四邻域孤立的 Patch。所有结构项作用于连续 keep 概率，
-因此可以反向传播到 Router。冻结阶段将选块模块设为 eval 并关闭梯度，
+因此可以反向传播到 Router。
+
+第二阶段分割损失为：`L_seg = L_pixel + λ_clDice L_clDice`。
+`L_pixel` 保留灰度软目标的 Weighted BCE + Dice；Soft-clDice 在完整回填掩码上约束线条骨架和拓扑，
+目标骨架使用 `target > 0` 的硬支持。空前景标签的 clDice 项退化为平均预测概率，防止虚假线条。
+实验效果不佳的 Local Affinity 和 Patch Seam 已从计算图、参数和日志中移除。
+
+冻结阶段将选块模块设为 eval 并关闭梯度，
 包括冻结 BatchNorm 运行统计；解冻微调的选块模块学习率默认是解码器的 0.1 倍。
 阶段顺序连续衔接上一轮状态，不自动回滚到 best_router.pt。
 像素 BCE 的前景权重由非零标签支持区域计数决定，Dice 保留灰度软目标。
@@ -95,6 +103,7 @@ python train.py \
   --router-boundary-weight 0.2 --router-pairwise-weight 0.1 \
   --router-morphology-weight 0.1 --router-boundary-margin 0.1 \
   --router-pair-margin 0.2 \
+  --seg-cldice-weight 0.2 --seg-cldice-iterations 10 \
   --val-ratio 0.2 --seed 26 --run-dir runs/train
 ```
 
@@ -168,21 +177,23 @@ runs/train/<时间编号>/
 ├── results.png
 ├── checkpoints/{latest,best_router,best}.pt
 └── validation/
+    ├── route_confusion_history.png
     └── epoch_0001_routing/
-        ├── metrics.json
-        ├── confusion_matrix.png
-        └── confusion_matrix_normalized.png
+        └── metrics.json
 outputs/<时间编号>/
 ├── args.json
 ├── *_prob.png / *_mask.png / *_overlay.png
 └── contact_sheet.png
 ```
 
-每轮验证以 epoch 和阶段编号归属于本次训练 run。第一阶段每轮输出 Patch 二分类混淆矩阵，并在训练日志中分别记录 CE、相邻关系、结构边界和孤立结构四项 Router 子损失：
-纵轴是真实类别，横轴是预测类别，类别顺序 Drop/Keep，计数布局 `[[TN,FP],[FN,TP]]`。
-另存按真实类别逐行归一化的矩阵，缺失类别显示为 0。
+每轮验证以 epoch 和阶段编号归属于本次训练 run。每轮 `metrics.json` 保留 Patch 混淆计数，
+布局为 `[[TN,FP],[FN,TP]]`。不再逐轮绘制混淆矩阵；第一阶段统一更新
+`validation/route_confusion_history.png`，绘制 TN、FP、FN、TP 四条时序曲线。
+TN/FP 按真实 Drop 总数归一化，FN/TP 按真实 Keep 总数归一化。纵轴使用支持零值的 symlog，
+`linthresh=0.01`，便于同时观察 0、0.02 和 0.9 等不同数量级的比例。
 
-`results.png` 每轮更新六个子图：总 Loss、选块 Loss、像素 Loss、Patch F1、Pixel F1、实际选块比例。
+`results.png` 使用动态子图网格，包含总 Loss、Router 四项子损失、基础像素 Loss、完整分割 Loss、
+Soft-clDice、Patch F1、Pixel F1 和实际选块比例。
 训练/验证各一条曲线；背景标记 Routing、Frozen、Fine-tune，epoch 分界处有虚线。
 总 Loss 在阶段之间断开，避免误认为损失组成不变。第一阶段像素指标、冻结阶段选块 Loss
 在 CSV 留空，绘图不伪装成 0。训练指标来自带增强的训练前向，验证来自 eval 前向，二者并非同一测量条件。

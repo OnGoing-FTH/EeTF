@@ -4,6 +4,7 @@ from collections import defaultdict
 import torch
 from torch.nn import functional as F
 from metrics import compute_sparse_edge_metrics
+from losses.structural_segmentation_loss import structural_segmentation_losses
 
 
 def _grid_edges(values):
@@ -75,24 +76,37 @@ def router_loss(keep_logits, patch_targets, patch_grid=None, selection_threshold
 
 def stage_loss(outputs, masks, segmentation_loss, stage, router_weight=1.0,
                boundary_weight=0.2, pairwise_weight=0.1, morphology_weight=0.1,
-               boundary_margin=0.1, pair_margin=0.2):
+               boundary_margin=0.1, pair_margin=0.2, cldice_weight=0.2,
+               cldice_iterations=10):
     if stage not in {"routing", "segmentation", "finetune"}:
         raise ValueError(f"unknown stage: {stage}")
     zero = masks.new_zeros(())
-    terms = ({key: zero for key in ('ce', 'pairwise', 'boundary', 'morphology')}
-             if stage == 'segmentation' else routing_loss_components(
-                 outputs['keep_logits'], outputs['patch_targets'], outputs['patch_grid'],
-                 outputs.get('selection_threshold', 0.5), boundary_margin, pair_margin))
-    route = terms['ce'] + pairwise_weight * terms['pairwise'] + boundary_weight * terms['boundary'] + morphology_weight * terms['morphology']
-    pixel = segmentation_loss(outputs['mask_logits'], masks) if stage != 'routing' else zero
-    total = route if stage == 'routing' else pixel + router_weight * route
-    return total, pixel, route, terms
+    route_terms = ({key: zero for key in ('ce', 'pairwise', 'boundary', 'morphology')}
+                   if stage == 'segmentation' else routing_loss_components(
+                       outputs['keep_logits'], outputs['patch_targets'], outputs['patch_grid'],
+                       outputs.get('selection_threshold', 0.5), boundary_margin, pair_margin))
+    route = (route_terms['ce'] + pairwise_weight * route_terms['pairwise']
+             + boundary_weight * route_terms['boundary']
+             + morphology_weight * route_terms['morphology'])
+    if stage == 'routing':
+        pixel = zero
+        structure_terms = {'cldice': zero}
+        segmentation = zero
+        total = route
+    else:
+        pixel = segmentation_loss(outputs['mask_logits'], masks)
+        structure_terms = structural_segmentation_losses(
+            outputs['mask_logits'], masks, cldice_iterations)
+        segmentation = pixel + cldice_weight * structure_terms['cldice']
+        total = segmentation + (router_weight * route if stage == 'finetune' else zero)
+    return total, pixel, route, segmentation, route_terms, structure_terms
 
 
 def train_one_epoch(model, loader, optimizer, segmentation_loss, device,
                     stage='finetune', scaler=None, router_weight=1.0,
                     boundary_weight=0.2, pairwise_weight=0.1, morphology_weight=0.1,
-                    boundary_margin=0.1, pair_margin=0.2):
+                    boundary_margin=0.1, pair_margin=0.2, cldice_weight=0.2,
+                    cldice_iterations=10):
     model.set_stage(stage)
     model.train()
     totals = defaultdict(float)
@@ -105,9 +119,10 @@ def train_one_epoch(model, loader, optimizer, segmentation_loss, device,
         with torch.autocast(device_type=device.type, enabled=scaler is not None and device.type == 'cuda'):
             outputs = model(images, labels=masks, routing_only=stage == 'routing')
             outputs['selection_threshold'] = model.selector.selection_threshold
-            loss, pixel, route, terms = stage_loss(outputs, masks, segmentation_loss, stage, router_weight,
-                                                    boundary_weight, pairwise_weight, morphology_weight,
-                                                    boundary_margin, pair_margin)
+            loss, pixel, route, segmentation, route_terms, structure_terms = stage_loss(
+                outputs, masks, segmentation_loss, stage, router_weight,
+                boundary_weight, pairwise_weight, morphology_weight,
+                boundary_margin, pair_margin, cldice_weight, cldice_iterations)
         if not torch.isfinite(loss):
             raise FloatingPointError(f'non-finite {stage} loss')
         if scaler is None:
@@ -117,8 +132,11 @@ def train_one_epoch(model, loader, optimizer, segmentation_loss, device,
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
-        for name, value in (('loss', loss), ('pixel_loss', pixel), ('router_loss', route),
-                            *[(f'router_{key}_loss', value) for key, value in terms.items()]):
+        for name, value in (
+                ('loss', loss), ('pixel_loss', pixel), ('segmentation_loss', segmentation),
+                ('router_loss', route),
+                *[(f'router_{key}_loss', value) for key, value in route_terms.items()],
+                *[(f'seg_{key}_loss', value) for key, value in structure_terms.items()]):
             totals[name] += value.detach().item()
         with torch.no_grad():
             predicted = outputs['keep_probs'] >= model.selector.selection_threshold

@@ -9,8 +9,14 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import numpy as np
 
-METRICS = ('loss', 'router_loss', 'router_ce_loss', 'router_pairwise_loss', 'router_boundary_loss', 'router_morphology_loss', 'pixel_loss', 'route_f1', 'foreground_f1', 'selected_fraction')
-FIELDS = ['epoch', 'stage'] + [f'{split}_{key}' for key in METRICS for split in ('train', 'val')]
+METRICS = ('loss', 'router_loss', 'router_ce_loss', 'router_pairwise_loss',
+           'router_boundary_loss', 'router_morphology_loss', 'segmentation_loss',
+           'pixel_loss', 'seg_cldice_loss', 'route_f1', 'foreground_f1',
+           'selected_fraction')
+CONFUSION_FIELDS = ('val_tn_rate', 'val_fp_rate', 'val_fn_rate', 'val_tp_rate')
+FIELDS = (['epoch', 'stage']
+          + [f'{split}_{key}' for key in METRICS for split in ('train', 'val')]
+          + list(CONFUSION_FIELDS))
 
 
 def create_run(root):
@@ -35,18 +41,30 @@ def metric_row(epoch, stage, training, validation):
     row = dict(epoch=epoch, stage=stage)
     for split, values in (('train', training), ('val', validation)):
         for key in METRICS:
-            inactive = (stage == 'routing' and key in ('pixel_loss', 'foreground_f1')) or (stage == 'segmentation' and key.startswith('router_'))
+            segmentation_key = key in ('segmentation_loss', 'pixel_loss',
+                                       'seg_cldice_loss', 'foreground_f1')
+            inactive = (stage == 'routing' and segmentation_key) or (stage == 'segmentation' and key.startswith('router_'))
             row[f'{split}_{key}'] = None if inactive else values.get(key)
+    for key in CONFUSION_FIELDS:
+        row[key] = None
+    if stage == 'routing' and validation.get('route_confusion') is not None:
+        (tn, fp), (fn, tp) = validation['route_confusion']
+        negative = max(tn + fp, 1)
+        positive = max(fn + tp, 1)
+        row.update(val_tn_rate=tn / negative, val_fp_rate=fp / negative,
+                   val_fn_rate=fn / positive, val_tp_rate=tp / positive)
     return row
 
 
 def save_history(run_dir, history, routing_epochs, frozen_epochs, epochs):
     run_dir = Path(run_dir)
     with (run_dir / 'metrics.csv').open('w', newline='', encoding='utf-8') as stream:
-        writer = csv.DictWriter(stream, fieldnames=FIELDS)
+        writer = csv.DictWriter(stream, fieldnames=FIELDS, extrasaction='ignore')
         writer.writeheader()
         writer.writerows(history)
-    fig, axes = plt.subplots(2, 3, figsize=(16, 9), constrained_layout=True)
+    columns = 3
+    rows = (len(METRICS) + columns - 1) // columns
+    fig, axes = plt.subplots(rows, columns, figsize=(16, 4.2 * rows), constrained_layout=True)
     boundaries = (0.5, routing_epochs + 0.5, routing_epochs + frozen_epochs + 0.5, epochs + 0.5)
     for ax, key in zip(axes.flat, METRICS):
         for index, (name, color) in enumerate(zip(('Routing', 'Frozen', 'Fine-tune'), ('#dceadf', '#f8e8ce', '#eadff0'))):
@@ -68,27 +86,36 @@ def save_history(run_dir, history, routing_epochs, frozen_epochs, epochs):
             ax.set_ylim(0, 1.12)
         ax.grid(alpha=.2)
         ax.legend(loc='best')
+    for ax in axes.flat[len(METRICS):]:
+        ax.set_visible(False)
     fig.savefig(run_dir / 'results.png', dpi=140)
+    plt.close(fig)
+    _save_route_confusion_history(run_dir / 'validation', history)
+
+
+def _save_route_confusion_history(directory, history):
+    points = [row for row in history if row['stage'] == 'routing' and row.get('val_tn_rate') is not None]
+    if not points:
+        return
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(10, 6), constrained_layout=True)
+    styles = (('val_tn_rate', 'TN rate', '#24733f'), ('val_fp_rate', 'FP rate', '#d1495b'),
+              ('val_fn_rate', 'FN rate', '#d9822b'), ('val_tp_rate', 'TP rate', '#2864a8'))
+    for key, label, color in styles:
+        ax.plot([row['epoch'] for row in points], [row[key] for row in points],
+                marker='o', linewidth=2, color=color, label=label)
+    ax.set_yscale('symlog', linthresh=0.01, linscale=1.0, base=10)
+    ticks = [0, .01, .02, .05, .1, .2, .5, .9, 1.0]
+    ax.set_yticks(ticks, [f'{value:g}' for value in ticks])
+    ax.set_ylim(0, 1.05)
+    ax.set(xlabel='Routing Epoch', ylabel='Row-normalized rate (symlog)',
+           title='Patch routing confusion over time')
+    ax.grid(True, which='both', alpha=.25)
+    ax.legend(ncol=4, loc='best')
+    fig.savefig(directory / 'route_confusion_history.png', dpi=150)
     plt.close(fig)
 
 
 def save_validation(directory, metrics, stage):
-    directory = Path(directory)
-    save_json(directory / 'metrics.json', metrics)
-    if stage != 'routing':
-        return
-    counts = np.asarray(metrics['route_confusion'], dtype=float)
-    normalized = np.divide(counts, counts.sum(axis=1, keepdims=True),
-                           out=np.zeros_like(counts), where=counts.sum(axis=1, keepdims=True) != 0)
-    for matrix, suffix in ((counts, ''), (normalized, '_normalized')):
-        fig, ax = plt.subplots(figsize=(5, 4), constrained_layout=True)
-        image = ax.imshow(matrix, cmap='Blues', vmin=0, vmax=1 if suffix else max(counts.max(), 1))
-        ax.set(xticks=[0, 1], yticks=[0, 1], xticklabels=['Drop', 'Keep'], yticklabels=['Drop', 'Keep'],
-               xlabel='Predicted', ylabel='True', title='Patch confusion' + (' (row normalized)' if suffix else ''))
-        for row in range(2):
-            for col in range(2):
-                text = f'{matrix[row, col]:.3f}' if suffix else str(int(matrix[row, col]))
-                ax.text(col, row, text, ha='center', va='center', color='white' if matrix[row, col] > image.norm.vmax / 2 else 'black')
-        fig.colorbar(image, ax=ax)
-        fig.savefig(directory / f'confusion_matrix{suffix}.png', dpi=140)
-        plt.close(fig)
+    save_json(Path(directory) / 'metrics.json', metrics)
