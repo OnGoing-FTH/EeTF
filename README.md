@@ -89,13 +89,13 @@ Router 使用独立选块监督，CNN/MLP/融合可经像素特征路径更新�
 ```bash
 python train.py \
   --data-root data --image-dir images --mask-dir edge_maps \
-  --epochs 100 --routing-epochs 20 --frozen-epochs 20 \
+  --epochs 100 --routing-epochs 45 --frozen-epochs 54 \
   --selection-threshold 0.5 --learning-rate 1e-4 \
   --finetune-lr-multiplier 0.1 --router-weight 1.0 \
   --router-boundary-weight 0.2 --router-pairwise-weight 0.1 \
   --router-morphology-weight 0.1 --router-boundary-margin 0.1 \
   --router-pair-margin 0.2 \
-  --val-ratio 0.2 --seed 42 --run-dir runs/train
+  --val-ratio 0.2 --seed 26 --run-dir runs/train
 ```
 
 `--epochs` 是三个阶段的总轮数，必须大于 routing-epochs + frozen-epochs。

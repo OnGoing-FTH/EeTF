@@ -1,5 +1,6 @@
 data/edge_maps
 data/images
+data/test_images
 logs
 checkpoints
 tests
@@ -7,4 +8,3 @@ outputs
 __pycache__/
 *.pyc
 runs/
-
