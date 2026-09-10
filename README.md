@@ -13,21 +13,22 @@ cd /home/fth/EdTF/EeTF
 依赖 PyTorch、torchvision、NumPy、Pillow、OpenCV、Matplotlib（Agg 无窗口绘图）。
 完整数据存放于 `data/images` 和 `data/edge_maps`，按相同文件名 stem 配对。
 灰度标签除以 255 保留软像素目标，块级标签通过 `label > 0` 后最大池化获得。
-默认固定 seed=42、验证比例 0.2；训练打乱，验证不打乱。当前只支持 B=1。
-训练同步几何增强，图像使用双线性插值，标签使用最近邻；最后 Letterbox 到
-`768x768`、`512x1024`、`1024x512`。验证只做确定性 Letterbox。
+默认固定 seed=42、验证比例 0.2；训练打乱，验证不打乱。训练和验证均支持
+`batch_size > 1`，同一 Batch 可有不同数量的 Selected Patch。
+训练同步几何增强，图像使用双线性插值，标签使用最近邻；训练与验证均 Letterbox 到
+固定的 `1024x1024`。
 
 ## 模块与特征流
 
 ```text
 main.py                         EdgeDynamicViT 模型
-patching/patching.py             64x32 无重叠分块
+patching/patching.py             64x64 无重叠分块，16x16 Patch Grid
 utils/block_feature_extractor.py 4+16+8 维统计及四邻域结构特征
-models/cnn_base.py               Patch CNN → [B,N,8192]
+models/cnn_base.py               Patch CNN + 二维 Grid 跨块交互 → [B,N,64,64,64]
 models/mlp_base.py               28→32→64→128→256→512→768
-models/feature_fusion.py         CNN 投影 + MLP → [B,N,768]
-models/dynamic_vit.py            阈值路由、2D-RoPE Attention
-models/patch_decoders.py         Selected/Remaining 双分支
+models/feature_fusion.py         CNN 空间池化投影 + MLP → [B,N,768]
+models/dynamic_vit.py            阈值路由与 packed Token 分组
+models/patch_decoders.py         Selected/Remaining 双分支局部像素解码
 losses/sparse_segmentation_loss.py  加权 BCE + Dice
 losses/structural_segmentation_loss.py  Soft-clDice 骨架拓扑损失
 engine/train.py                  分阶段损失和单轮优化
@@ -37,18 +38,18 @@ infer.py / engine/infer.py       掩码、叠加图与拼图
 ```
 
 ```text
-图像 [B,3,H,W] → Patch [B*N,3,64,32]
-  ├─ CNN → [B,N,8192] → 投影 768
-  └─ 28 维统计 → MLP → [B,N,768]
-               ↓ 融合
-         Router → Keep 概率 [B,N]
-               ↓ 阈值划分
-  ├─ selected: RoPE 特征投影 768→128 + 原始 Patch CNN
-  │            → 块内 Transformer → [N1,1,64,32]
-  └─ remaining: [B,N2,768] → 512 → [B*N2,1,32,16]
-                → 上采样解码 → [B,N2,1,64,32]
-               ↓ 原索引回填
-         mask_logits [B,1,H,W]
+图像 [B,3,1024,1024] → Patch [B*256,3,64,64]
+  ├─ Patch CNN → DWConv/GAP → 16x16 Grid Conv → Gate → [B,256,64,64,64]
+  └─ 28 维统计 → MLP → [B,256,768]
+               ↓ CNN 空间池化后融合
+         Router → Keep 概率 [B,256]
+               ↓ 每个样本按阈值独立划分并打包
+  ├─ selected: 原始 Patch [M1,3,64,64] + context [M1,768]
+  │            → 局部 CNN + 2 层块内 Transformer → [M1,1,64,64]
+  └─ remaining: context [M2,768] → [M2,1,32,32]
+                → 上采样解码 → [M2,1,64,64]
+               ↓ sample / Patch index 回填
+         mask_logits [B,1,1024,1024]
 ```
 
 28 维为 4 维基础统计、16 维四邻域基础差异、8 维边界强度/法向梯度差异，不补零。
@@ -74,10 +75,10 @@ Router 使用独立选块监督，CNN/MLP/融合可经像素特征路径更新�
 | 阶段 | 默认轮次 | 可训练模块 | 损失 |
 |---|---|---|---|
 | routing | 1–20 | CNN、统计 MLP、融合、Router | 加权 CE + 相邻关系 + 结构边界 + 孤立结构损失 |
-| segmentation | 21–40 | RoPE、两个解码器 | Weighted BCE + Dice + Soft-clDice |
+| segmentation | 21–40 | Selected/Remaining Decoder | Weighted BCE + Dice + Soft-clDice |
 | finetune | 41–100 | 全部模块 | 分割结构损失 + router_weight × 选块损失 |
 
-选块预训练不执行 RoPE/解码器。Router Loss 为：
+选块预训练不执行像素解码器。Router Loss 为：
 `L_router = L_weighted_CE + λ_pair L_pairwise + λ_boundary L_boundary + λ_morph L_morphology`。
 其中相邻 Patch 同标签时约束概率接近、异标签时约束概率分离；边界项将概率推离选块阈值；
 形态学项只惩罚预测类别与标签不一致且四邻域孤立的 Patch。所有结构项作用于连续 keep 概率，
@@ -88,8 +89,8 @@ Router 使用独立选块监督，CNN/MLP/融合可经像素特征路径更新�
 目标骨架使用 `target > 0` 的硬支持。空前景标签的 clDice 项退化为平均预测概率，防止虚假线条。
 实验效果不佳的 Local Affinity 和 Patch Seam 已从计算图、参数和日志中移除。
 
-冻结阶段将选块模块设为 eval 并关闭梯度，
-包括冻结 BatchNorm 运行统计；解冻微调的选块模块学习率默认是解码器的 0.1 倍。
+冻结阶段将 CNN、统计 MLP、融合与 Router 设为 eval 并关闭梯度，
+包括冻结 BatchNorm 运行统计；解冻微调的路由模块学习率默认是解码器的 0.1 倍。
 阶段顺序连续衔接上一轮状态，不自动回滚到 best_router.pt。
 像素 BCE 的前景权重由非零标签支持区域计数决定，Dice 保留灰度软目标。
 `losses/dynamic_loss.py` 仅保留为旧工具，新流程不调用它。
@@ -103,7 +104,8 @@ python train.py \
   --router-boundary-weight 0.2 --router-pairwise-weight 0.1 \
   --router-morphology-weight 0.1 --router-boundary-margin 0.1 \
   --router-pair-margin 0.2 \
-  --seg-cldice-weight 0.2 --seg-cldice-iterations 10 \
+  --seg-cldice-weight 0.5 --seg-cldice-iterations 10 \
+  --batch-size 1 --val-batch-size 1 \
   --val-ratio 0.2 --seed 26 --run-dir runs/train
 ```
 
@@ -120,7 +122,8 @@ python train.py --resume runs/train/<时间编号>/checkpoints/latest.pt --epoch
 ```
 
 恢复时使用 checkpoint 的日程、阈值及数据参数，拒绝变化的数据划分；
-可指定新的总轮数及 worker 数。新格式恢复沿用 checkpoint 所在 run，忽略新的 run-dir；旧三阶段 checkpoint 没有曲线历史时创建新 run，不补造历史指标。只支持格式版本 2 的三阶段 checkpoint。
+可指定新的总轮数及 worker 数。新格式恢复沿用 checkpoint 所在 run，忽略新的 run-dir。
+仅支持格式版本 3 的 `1024x1024` 多 Batch checkpoint；旧尺寸、旧 RoPE 和旧分组格式的权重不兼容。
 原固定 top-k 训练状态不支持直接恢复。
 
 验证阶段同时报告 Patch Precision/Recall/F1 和实际选中比例；
@@ -134,8 +137,8 @@ python infer.py --input data/images --checkpoint runs/train/20260908_091004_5817
   --output-dir outputs --threshold 0.5 --tile-width 400 --tile-height 300
 ```
 
-`--input` 可为单张图或目录。选块阈值自动从 checkpoint 读取；
-`--threshold` 仅控制最终像素掩码阈值，不是选块阈值。
+`--input` 可为单张图或目录。推理只接受 `format_version=3` 的 `1024x1024` 多 Batch checkpoint；
+选块阈值自动从 checkpoint 读取；`--threshold` 仅控制最终像素掩码阈值，不是选块阈值。
 去除 Letterbox 填充后恢复原始尺寸，输出：
 
 ```text
@@ -156,12 +159,15 @@ python infer.py --input data/images \
 ```
 
 `--benchmark` 仅测速，不保存掩码或执行后处理；每张图先完成读取、Letterbox 和设备传输，
-然后预热 10 次，测量 50 次 `model(inputs)`。CUDA 同步计时，使用 B=1、FP32 和 inference_mode。
+然后预热 10 次，测量 50 次 `model(inputs)`。CUDA 同步计时，使用 FP32 和 inference_mode；
+`benchmark.json` 同时记录 batch FPS 与 image FPS。
 计时包含模型内部切块、统计特征、动态路由和解码，排除读取、预处理、设备传输、输出 sigmoid、
 掩码还原、可视化与文件保存。同步墙钟时间包含模型内部 CPU 调度，不是端到端处理 FPS。
 
-输出在新的时间目录 `outputs/<时间编号>/benchmark.json`，包含每图输入尺寸、平均延迟与 FPS，
-以及设备、选块阈值和汇总结果。汇总 FPS = 总测量帧数 / 总前向耗时，不直接平均逐图 FPS。
+输出在新的时间目录 `outputs/<时间编号>/benchmark.json`，包含每图输入尺寸、平均 batch 延迟、
+batch FPS、image FPS、设备、选块阈值和汇总结果。当前命令行逐图测量，因此每个 benchmark
+Batch 的大小为 1；底层 `benchmark_forward` 也支持预先组成的多 Batch 张量。汇总 image FPS =
+总图像数 / 总前向耗时，不直接平均逐图 FPS。
 阈值路由计算量依赖图像内容，建议使用真实图片目录测量；预热耗时不计入结果。
 
 ## 运行目录与曲线
@@ -207,12 +213,11 @@ Soft-clDice、Patch F1、Pixel F1 和实际选块比例。
 python -m unittest discover -s tests -v
 ```
 
-覆盖统计特征、邻域关系、三种尺寸、RoPE 梯度、阈值分组、空分支、阶段冻结及模型/优化器重载。
+覆盖统计特征、邻域关系、1024x1024 输出、跨块 Grid 交互、多 Batch 动态分组、空分支、阶段冻结及模型/优化器重载。
 阈值选块可能选择所有 Patch，峰值显存不再受固定比例约束。
 ONNX 动态 nonzero 索引及空分支导出需要单独验证，当前不保证可导出。
 改变统计语义和 Selected 上下文解码器后，旧权重不再严格兼容，建议重新训练。
 
-
 ## 推理速度
 
-Overall: 68.04 FPS, 14.696 ms/frame
+Overall: 8.84 FPS, 113.086 ms/frame 1024*1024

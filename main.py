@@ -1,14 +1,12 @@
-"""Main sparse-patch segmentation model."""
-
+"""Sparse Patch segmentation model with Patch-grid CNN interaction."""
 from __future__ import annotations
 
 from typing import Optional
-
 import torch
 from torch import Tensor, nn
 
 from models.cnn_base import CNNBase
-from models.dynamic_vit import RoPEAttention, TokenSelector
+from models.dynamic_vit import TokenSelector
 from models.feature_fusion import FeatureFusion
 from models.mlp_base import MLPBase
 from models.patch_decoders import RemainingPatchDecoder, SelectedPatchDecoder
@@ -18,25 +16,24 @@ from utils.label_utils import pool_patch_targets
 
 
 class EdgeDynamicViT(nn.Module):
-    """B=1 sparse patch segmentation model with selected and remaining branches."""
+    """Dynamic Patch segmentation model supporting variable selected counts per batch."""
 
-    def __init__(self, selection_threshold: float = 0.5, stats_dim: int = 28) -> None:
+    def __init__(self, selection_threshold: float = 0.5, stats_dim: int = 28,
+                 patch_height: int = 64, patch_width: int = 64) -> None:
         super().__init__()
         if stats_dim != 28:
             raise ValueError("stats_dim must be 28 (4 base + 24 neighborhood features)")
         self.stats_dim = stats_dim
-        self.patching = ImagePatchingRect(patch_height=64, patch_width=32)
+        self.patch_size = (patch_height, patch_width)
+        self.patching = ImagePatchingRect(patch_height, patch_width)
         self.block_extractor = BlockFeatureExtractor()
-        self.cnn_base = CNNBase()
+        self.cnn_base = CNNBase(output_channels=64)
         self.mlp_base = MLPBase(input_dim=stats_dim)
-        self.feature_fusion = FeatureFusion()
+        self.feature_fusion = FeatureFusion(cnn_dim=64)
         self.selector = TokenSelector(selection_threshold=selection_threshold)
         self.training_stage = "finetune"
-        self.pre_attention_norm = nn.LayerNorm(768)
-        self.attention = RoPEAttention(d_model=768, nheads=12)
-        self.post_attention_norm = nn.LayerNorm(768)
-        self.selected_decoder = SelectedPatchDecoder()
-        self.remaining_decoder = RemainingPatchDecoder()
+        self.selected_decoder = SelectedPatchDecoder(patch_height=patch_height, patch_width=patch_width)
+        self.remaining_decoder = RemainingPatchDecoder(patch_height=patch_height, patch_width=patch_width)
 
     def routing_modules(self):
         return (self.block_extractor, self.cnn_base, self.mlp_base, self.feature_fusion, self.selector)
@@ -45,9 +42,18 @@ class EdgeDynamicViT(nn.Module):
         if stage not in {"routing", "segmentation", "finetune"}:
             raise ValueError(f"unknown stage: {stage}")
         self.training_stage = stage
-        self.requires_grad_(stage != "routing")
-        for module in self.routing_modules():
-            module.requires_grad_(stage != "segmentation")
+        # Explicitly define trainable ownership for every stage.
+        self.requires_grad_(False)
+        if stage == "routing":
+            for module in self.routing_modules():
+                module.requires_grad_(True)
+        elif stage == "segmentation":
+            routing_ids = {id(module) for module in self.routing_modules()}
+            for module in self.children():
+                if id(module) not in routing_ids:
+                    module.requires_grad_(True)
+        else:
+            self.requires_grad_(True)
         self.train(self.training)
 
     def train(self, mode: bool = True):
@@ -57,151 +63,83 @@ class EdgeDynamicViT(nn.Module):
                 module.eval()
         return self
 
-    @staticmethod
-    def _make_patch_coords(
-        batch_size: int,
-        patch_grid: tuple[int, int],
-        device: torch.device,
-        dtype: torch.dtype,
-    ) -> Tensor:
-        """Return patch-center coordinates ``[B, N, 2]`` in (x, y) order."""
-        h_patches, w_patches = patch_grid
-        y = (torch.arange(h_patches, device=device, dtype=dtype) + 0.5) / h_patches
-        x = (torch.arange(w_patches, device=device, dtype=dtype) + 0.5) / w_patches
-        grid_y, grid_x = torch.meshgrid(y, x, indexing="ij")
-        coords = torch.stack((grid_x, grid_y), dim=-1).reshape(1, -1, 2)
-        return coords.expand(batch_size, -1, -1)
-
-    def _prepare_block_features(self, patches: Tensor, block_features: Optional[Tensor], batch_size: int, patch_grid: tuple[int, int]) -> Tensor:
-        """Use supplied normalized statistics or compute all 28 columns."""
+    def _prepare_block_features(self, patches, block_features, batch_size, patch_grid):
         if block_features is not None:
             if block_features.shape != (patches.shape[0], self.stats_dim):
-                raise ValueError(
-                    "block_features must have shape "
-                    f"({patches.shape[0]}, {self.stats_dim}), got {tuple(block_features.shape)}"
-                )
+                raise ValueError(f"block_features must have shape ({patches.shape[0]}, {self.stats_dim})")
             return block_features
         return self.block_extractor(patches, batch_size=batch_size, grid_size=patch_grid)
 
     @staticmethod
-    def _gather_patches(patches: Tensor, indices: Tensor, batch_size: int, patch_count: int) -> Tensor:
-        """Gather flattened patches using [B, K] indices and return [B*K, C, H, W]."""
-        channels, height, width = patches.shape[1:]
-        patches = patches.reshape(batch_size, patch_count, channels, height, width)
-        selected = patches.gather(
-            1, indices[..., None, None, None].expand(-1, -1, channels, height, width)
-        )
-        return selected.reshape(-1, channels, height, width)
+    def _pack_by_indices(features, indices):
+        parts = [features[b, idx] for b, idx in enumerate(indices) if idx.numel()]
+        return torch.cat(parts, dim=0) if parts else features.new_empty((0, features.shape[-1]))
 
     @staticmethod
-    def _merge_patch_masks(
-        selected_masks: Tensor,
-        selected_indices: Tensor,
-        remaining_masks: Tensor,
-        remaining_indices: Tensor,
-        patch_grid: tuple[int, int],
-    ) -> Tensor:
-        """Restore branch masks to ``[B, 1, H, W]`` using original patch indices."""
-        batch_size = selected_indices.shape[0]
-        h_patches, w_patches = patch_grid
-        patch_count = h_patches * w_patches
-        full = selected_masks.new_zeros(batch_size, patch_count, 1, 64, 32)
-        selected_masks = selected_masks.reshape(batch_size, -1, 1, 64, 32)
-        full.scatter_(1, selected_indices[..., None, None, None].expand_as(selected_masks), selected_masks)
-        if remaining_masks.shape[1] > 0:
-            full.scatter_(
-                1,
-                remaining_indices[..., None, None, None].expand_as(remaining_masks),
-                remaining_masks,
-            )
-        full = full.reshape(batch_size, h_patches, w_patches, 1, 64, 32)
-        full = full.permute(0, 3, 1, 4, 2, 5).contiguous()
-        return full.reshape(batch_size, 1, h_patches * 64, w_patches * 32)
+    def _gather_patches(patches, indices, batch_size, patch_count):
+        c, h, w = patches.shape[1:]
+        patches = patches.reshape(batch_size, patch_count, c, h, w)
+        parts = [patches[b, idx] for b, idx in enumerate(indices) if idx.numel()]
+        return torch.cat(parts, dim=0) if parts else patches.new_empty((0, c, h, w))
 
-    def forward(
-        self,
-        images: Tensor,
-        labels: Optional[Tensor] = None,
-        block_features: Optional[Tensor] = None,
-        routing_only: bool = False,
-    ) -> dict[str, Tensor | tuple[int, int]]:
-        """Run both patch branches and return the full-resolution mask logits."""
-        if images.shape[0] != 1:
-            raise ValueError("EdgeDynamicViT currently requires batch size B=1")
+    @staticmethod
+    def _merge_packed(selected_masks, selected_indices, remaining_masks, remaining_indices,
+                      patch_grid, patch_size, batch_size):
+        hp, wp = patch_grid
+        ph, pw = patch_size
+        n = hp * wp
+        full = selected_masks.new_zeros(batch_size, n, 1, ph, pw)
+        so = ro = 0
+        for b in range(batch_size):
+            ns, nr = selected_indices[b].numel(), remaining_indices[b].numel()
+            if ns:
+                full[b, selected_indices[b]] = selected_masks[so:so + ns]
+                so += ns
+            if nr:
+                full[b, remaining_indices[b]] = remaining_masks[ro:ro + nr]
+                ro += nr
+        full = full.reshape(batch_size, hp, wp, 1, ph, pw).permute(0, 3, 1, 4, 2, 5)
+        return full.reshape(batch_size, 1, hp * ph, wp * pw)
 
+    def forward(self, images: Tensor, labels: Optional[Tensor] = None,
+                block_features: Optional[Tensor] = None, routing_only: bool = False):
+        if images.ndim != 4:
+            raise ValueError("images must have shape [B,3,H,W]")
+        batch_size = images.shape[0]
         patches, patch_grid = self.patching(images)
-        batch_size, patch_count = images.shape[0], patch_grid[0] * patch_grid[1]
-        coords = self._make_patch_coords(batch_size, patch_grid, images.device, images.dtype)
-
-        cnn_features = self.cnn_base(patches, patch_grid)
+        patch_count = patch_grid[0] * patch_grid[1]
+        cnn_maps = self.cnn_base(patches, patch_grid)
         statistics = self._prepare_block_features(patches, block_features, batch_size, patch_grid)
         mlp_features = self.mlp_base(statistics, patch_grid)
-        fused_features = self.feature_fusion(cnn_features, mlp_features)
-
+        fused = self.feature_fusion(cnn_maps, mlp_features)
+        logits = self.selector.router(fused)
+        probs = logits.softmax(-1)[..., 1]
         if routing_only:
-            logits = self.selector.router(fused_features)
-            output = {"keep_logits": logits, "keep_probs": logits.softmax(-1)[..., 1], "patch_grid": patch_grid}
+            output = {'keep_logits': logits, 'keep_probs': probs, 'patch_grid': patch_grid}
             if labels is not None:
-                output["patch_targets"] = pool_patch_targets(labels, patch_grid)
+                output['patch_targets'] = pool_patch_targets(labels, patch_grid, self.patch_size)
             return output
-
-        selected_features, selected_coords, keep_logits, keep_probs, selected_indices, remaining_indices = self.selector(
-            fused_features, coords
-        )
-        if selected_indices.shape[1]:
-            selected_features = selected_features + self.attention(
-                self.pre_attention_norm(selected_features), selected_coords
-            )
-            selected_features = self.post_attention_norm(selected_features)
-            selected_patches = self._gather_patches(patches, selected_indices, batch_size, patch_count)
+        selected_features, _, _, selected_indices, remaining_indices = self.selector(fused)
+        selected_patches = self._gather_patches(patches, selected_indices, batch_size, patch_count)
+        remaining_features = self._pack_by_indices(fused, remaining_indices)
+        if selected_patches.shape[0]:
             selected_masks = self.selected_decoder(selected_patches, selected_features)
         else:
-            selected_masks = fused_features.new_empty(0, 1, 64, 32)
-
-        remaining_features = fused_features.gather(
-            1, remaining_indices[..., None].expand(-1, -1, fused_features.shape[-1])
-        )
-        remaining_masks = (self.remaining_decoder(remaining_features) if remaining_indices.shape[1]
-                           else fused_features.new_empty(batch_size, 0, 1, 64, 32))
-        selected_masks = selected_masks.to(remaining_masks.dtype)
-        full_mask_logits = self._merge_patch_masks(
-            selected_masks, selected_indices, remaining_masks, remaining_indices, patch_grid
-        )
-
-        output: dict[str, Tensor | tuple[int, int]] = {
-            "mask_logits": full_mask_logits,
-            "selected_features": selected_features,
-            "selected_coords": selected_coords,
-            "remaining_features": remaining_features,
-            "keep_logits": keep_logits,
-            "keep_probs": keep_probs,
-            "selected_indices": selected_indices,
-            "remaining_indices": remaining_indices,
-            "patch_grid": patch_grid,
-        }
+            selected_masks = patches.new_empty(0, 1, *self.patch_size)
+        if remaining_features.shape[0]:
+            remaining_masks = self.remaining_decoder(remaining_features)
+        else:
+            remaining_masks = fused.new_empty(0, 1, *self.patch_size)
+        full_mask = self._merge_packed(selected_masks, selected_indices, remaining_masks,
+                                       remaining_indices, patch_grid, self.patch_size, batch_size)
+        output = {'mask_logits': full_mask, 'selected_features': selected_features,
+                  'remaining_features': remaining_features,
+                  'keep_logits': logits, 'keep_probs': probs,
+                  'selected_indices': selected_indices, 'remaining_indices': remaining_indices,
+                  'patch_grid': patch_grid}
         if labels is not None:
-            patch_targets = pool_patch_targets(labels, patch_grid)
-            output["patch_targets"] = patch_targets
-            output["selected_targets"] = patch_targets.gather(1, selected_indices)
-            output["remaining_targets"] = patch_targets.gather(1, remaining_indices)
+            targets = pool_patch_targets(labels, patch_grid, self.patch_size)
+            output['patch_targets'] = targets
+            output['selected_targets'] = [targets[b, idx] for b, idx in enumerate(selected_indices)]
+            output['remaining_targets'] = [targets[b, idx] for b, idx in enumerate(remaining_indices)]
         return output
-
-
-if __name__ == "__main__":
-    test_resolutions = ((768, 768), (512, 1024), (1024, 512))
-    model = EdgeDynamicViT(selection_threshold=0.5).eval()
-
-    with torch.inference_mode():
-        for height, width in test_resolutions:
-            images = torch.randn(1, 3, height, width)
-            labels = (torch.rand(1, 1, height, width) > 0.99).float()
-            outputs = model(images, labels=labels)
-            print(f"input shape:              {tuple(images.shape)}")
-            print(f"patch grid:               {outputs['patch_grid']}")
-            print(f"mask logits shape:        {tuple(outputs['mask_logits'].shape)}")
-            print(f"selected feature shape:   {tuple(outputs['selected_features'].shape)}")
-            print(f"remaining feature shape:  {tuple(outputs['remaining_features'].shape)}")
-            print(f"keep probability shape:   {tuple(outputs['keep_probs'].shape)}")
-            print(f"selected index shape:     {tuple(outputs['selected_indices'].shape)}")
-            print(f"remaining index shape:    {tuple(outputs['remaining_indices'].shape)}")
-            print(f"patch target shape:       {tuple(outputs['patch_targets'].shape)}")

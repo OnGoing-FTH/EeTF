@@ -62,10 +62,14 @@ def parse_args():
     parser.add_argument('--router-pair-margin', type=float, default=0.2)
     parser.add_argument('--seg-cldice-weight', type=float, default=0.5)
     parser.add_argument('--seg-cldice-iterations', type=int, default=10)
+    parser.add_argument('--batch-size', type=int, default=1)
+    parser.add_argument('--val-batch-size', type=int, default=1)
     parser.add_argument('--num-workers', type=int, default=0)
     parser.add_argument('--run-dir', '--checkpoint-dir', dest='run_dir', default='runs/train', help='parent directory for timestamped training runs')
     parser.add_argument('--resume', default=None)
     args = parser.parse_args()
+    if args.batch_size < 1 or args.val_batch_size < 1:
+        parser.error('batch-size and val-batch-size must be positive')
     if args.routing_epochs < 1 or args.frozen_epochs < 1 or args.epochs <= args.routing_epochs + args.frozen_epochs:
         parser.error('require routing-epochs >= 1, frozen-epochs >= 1 and epochs > their sum')
     if not 0 < args.finetune_lr_multiplier <= 1 or args.learning_rate <= 0 or args.router_weight <= 0:
@@ -85,8 +89,8 @@ def main():
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
-        if checkpoint.get('format_version') != 2:
-            raise ValueError('resume requires a three-stage checkpoint (format_version=2)')
+        if checkpoint.get('format_version') != 3:
+            raise ValueError('resume requires a 1024x1024 multi-batch checkpoint (format_version=3)')
         # Resume the saved schedule and split, rather than silently changing stages.
         for key, value in checkpoint['args'].items():
             if key not in {'resume', 'epochs', 'checkpoint_dir', 'run_dir', 'num_workers'}:
@@ -103,9 +107,10 @@ def main():
     if checkpoint and checkpoint['split'] != split:
         raise ValueError('dataset split changed since checkpoint; refusing resume')
     generator = torch.Generator().manual_seed(args.seed)
-    train_loader = DataLoader(train_data, batch_size=1, shuffle=True, generator=generator,
+    train_loader = DataLoader(train_data, batch_size=args.batch_size, shuffle=True, generator=generator,
                               num_workers=args.num_workers, pin_memory=device.type == 'cuda')
-    val_loader = DataLoader(val_data, batch_size=1, num_workers=args.num_workers)
+    val_loader = DataLoader(val_data, batch_size=args.val_batch_size, shuffle=False,
+                            num_workers=args.num_workers, pin_memory=device.type == 'cuda')
     model = EdgeDynamicViT(selection_threshold=args.selection_threshold).to(device)
     optimizer = make_optimizer(model, args.learning_rate, args.weight_decay)
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
@@ -166,7 +171,7 @@ def main():
         if stage == 'segmentation':
             validation_metrics['router_loss'] = None
         save_validation(run_dir / 'validation' / f'epoch_{epoch + 1:04d}_{stage}', validation_metrics, stage)
-        state = dict(history=history, format_version=2, epoch=epoch, stage=stage, model=model.state_dict(),
+        state = dict(history=history, format_version=3, epoch=epoch, stage=stage, model=model.state_dict(),
                      optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), best=best,
                      args=vars(args), split=split, random_state=random.getstate(), numpy_state=np.random.get_state(),
                      torch_state=torch.get_rng_state(), loader_state=generator.get_state(),

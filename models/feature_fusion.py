@@ -9,18 +9,18 @@ class FeatureFusion(nn.Module):
     """Project CNN features and fuse them with MLP features.
 
     Args:
-        cnn_dim: Flattened CNN feature dimension, default ``64 * 16 * 8``.
+        cnn_dim: CNN channel dimension after Patch-level spatial fusion.
         feature_dim: Shared fusion dimension, default ``768``.
 
     Inputs:
-        cnn_features: ``(B, N, cnn_dim)``.
+        cnn_features: ``(B, N, cnn_dim)`` or ``(B,N,cnn_dim,H,W)``.
         mlp_features: ``(B, N, feature_dim)``.
 
     Output:
         ``(B, N, feature_dim)``.
     """
 
-    def __init__(self, cnn_dim: int = 64 * 16 * 8, feature_dim: int = 768) -> None:
+    def __init__(self, cnn_dim: int = 64, feature_dim: int = 768) -> None:
         super().__init__()
         self.cnn_projection = nn.Sequential(
             nn.Linear(cnn_dim, feature_dim),
@@ -35,6 +35,12 @@ class FeatureFusion(nn.Module):
 
     def forward(self, cnn_features: Tensor, mlp_features: Tensor) -> Tensor:
         """Return fused features with shape ``(B, N, feature_dim)``."""
+        if cnn_features.ndim == 5:
+            cnn_features = cnn_features.mean(dim=(-2, -1))
+        if cnn_features.ndim != 3 or mlp_features.ndim != 3:
+            raise ValueError("cnn_features and mlp_features must be [B,N,C]")
+        if cnn_features.shape[:2] != mlp_features.shape[:2]:
+            raise ValueError("CNN and MLP features must have matching B,N")
         projected_cnn = self.cnn_projection(cnn_features)
         fused = projected_cnn + mlp_features
         return self.output_projection(fused)

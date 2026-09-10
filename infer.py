@@ -42,8 +42,8 @@ def main() -> None:
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     if checkpoint.get('stage') == 'routing':
         raise ValueError('routing-only checkpoint has no trained segmentation decoder')
-    if 'model' in checkpoint and checkpoint.get('format_version') != 2:
-        raise ValueError('use a three-stage checkpoint for threshold-based inference')
+    if 'model' in checkpoint and checkpoint.get('format_version') != 3:
+        raise ValueError('use a format_version=3 1024x1024 multi-batch checkpoint for inference')
     model = EdgeDynamicViT(selection_threshold=checkpoint.get('args', {}).get('selection_threshold', 0.5)).to(device)
     model.load_state_dict(checkpoint.get("model", checkpoint))
     records = []
@@ -62,17 +62,18 @@ def main() -> None:
             result = benchmark_forward(model, inputs, args.warmup, args.iterations)
             result['image'] = str(image_path)
             results.append(result)
-            print(f'{image_path.name}: {result["mean_latency_ms"]:.3f} ms, {result["fps"]:.2f} FPS', flush=True)
+            print(f'{image_path.name}: {result["mean_latency_ms"]:.3f} ms/batch, {result["image_fps"]:.2f} image FPS', flush=True)
         frames = sum(row['iterations'] for row in results)
         elapsed = sum(row['total_seconds'] for row in results)
-        summary = {'scope': 'model forward only, synchronized wall time; B=1, FP32',
+        summary = {'scope': 'model forward only, synchronized wall time; FP32',
                    'device_name': torch.cuda.get_device_name(device) if device.type == 'cuda' else 'CPU',
                    'torch_version': str(torch.__version__), 'cpu_threads': torch.get_num_threads(),
                    'selection_threshold': model.selector.selection_threshold,
-                   'frames': frames, 'total_seconds': elapsed, 'fps': frames / elapsed,
-                   'mean_latency_ms': elapsed * 1000 / frames, 'images': results}
+                   'batches': frames, 'images_per_batch': 1, 'total_seconds': elapsed,
+                   'batch_fps': frames / elapsed, 'image_fps': frames / elapsed,
+                   'fps': frames / elapsed, 'mean_latency_ms': elapsed * 1000 / frames, 'images': results}
         save_json(output_dir / 'benchmark.json', summary)
-        print(f'Overall: {summary["fps"]:.2f} FPS, {summary["mean_latency_ms"]:.3f} ms/frame')
+        print(f'Overall: {summary["image_fps"]:.2f} image FPS, {summary["mean_latency_ms"]:.3f} ms/batch')
         return
     for image_path in image_paths:
         image = load_image(image_path)

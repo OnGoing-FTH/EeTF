@@ -13,7 +13,7 @@ class ImagePatchingRect(nn.Module):
     dimensions are flattened in the output.
     """
 
-    def __init__(self, patch_height: int = 64, patch_width: int = 32) -> None:
+    def __init__(self, patch_height: int = 64, patch_width: int = 64) -> None:
         super().__init__()
         if patch_height <= 0 or patch_width <= 0:
             raise ValueError("patch_height and patch_width must be positive")
@@ -53,7 +53,7 @@ class ImagePatchingRect(nn.Module):
 if __name__ == "__main__":
     batch_size, channels, height, width = 2, 3, 128, 128
     images = torch.randn(batch_size, channels, height, width)
-    patching = ImagePatchingRect(patch_height=64, patch_width=32)
+    patching = ImagePatchingRect(patch_height=64, patch_width=64)
     patches, (h_patches, w_patches) = patching(images) # (B*N, 3, 64, 32)
 
 

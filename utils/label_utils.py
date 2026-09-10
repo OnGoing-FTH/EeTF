@@ -34,7 +34,7 @@ def load_binary_png_label(path: str | Path, threshold: float = 0.0) -> Tensor:
 def pool_patch_targets(
     labels: Tensor,
     patch_grid: tuple[int, int],
-    patch_size: tuple[int, int] = (64, 32),
+    patch_size: tuple[int, int] = (64, 64),
     threshold: float = 0.0,
 ) -> Tensor:
     """Max-pool a mask and return hard patch occupancy targets ``[B, N]``.
@@ -56,7 +56,7 @@ def pool_patch_targets(
 def pool_patch_soft_targets(
     labels: Tensor,
     patch_grid: tuple[int, int],
-    patch_size: tuple[int, int] = (64, 32),
+    patch_size: tuple[int, int] = (64, 64),
 ) -> Tensor:
     """Max-pool grayscale line intensity, returning soft targets ``[B, N]``."""
     if labels.ndim == 3:
