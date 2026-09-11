@@ -11,7 +11,7 @@ from torch import Tensor, nn
 class TokenSelector(nn.Module):
     """Predict Keep/Drop logits and partition every sample by probability."""
 
-    def __init__(self, d_model: int = 768, selection_threshold: float = 0.5, hidden_dim: int = 192) -> None:
+    def __init__(self, d_model: int = 256, selection_threshold: float = 0.5, hidden_dim: int = 192) -> None:
         super().__init__()
         if not 0.0 <= selection_threshold <= 1.0:
             raise ValueError("selection_threshold must be in [0, 1]")

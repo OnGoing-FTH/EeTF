@@ -6,19 +6,21 @@ from torch import Tensor, nn
 
 
 class MLPBase(nn.Module):
-    """Project per-patch statistics to one 768-dimensional feature.
+    """Project per-patch statistics to one shared feature vector.
 
     Input shape:
         ``(B * N, 28)``.
 
     Output shape:
-        ``(B, N, 768)``, where ``N = h_patches * w_patches``.
+        ``(B, N, feature_dim)``, where ``N = h_patches * w_patches``.
     """
 
-    def __init__(self, input_dim: int = 28) -> None:
+    def __init__(self, input_dim: int = 28, feature_dim: int = 256) -> None:
         super().__init__()
+        if feature_dim < 1:
+            raise ValueError("feature_dim must be positive")
         self.input_dim = input_dim
-        self.output_dim = 768
+        self.output_dim = feature_dim
 
         self.projection = nn.Sequential(
             nn.Linear(input_dim, 32),
@@ -27,11 +29,7 @@ class MLPBase(nn.Module):
             nn.GELU(),
             nn.Linear(64, 128),
             nn.GELU(),
-            nn.Linear(128, 256),
-            nn.GELU(),
-            nn.Linear(256, 512),
-            nn.GELU(),
-            nn.Linear(512, self.output_dim),
+            nn.Linear(128, self.output_dim),
         )
 
     def forward(
@@ -39,7 +37,7 @@ class MLPBase(nn.Module):
         features: Tensor,
         patch_grid: tuple[int, int],
     ) -> Tensor:
-        """Return block features with shape ``(B, N, 768)``."""
+        """Return block features with shape ``(B, N, feature_dim)``."""
         h_patches, w_patches = patch_grid
         patch_count = h_patches * w_patches
         batch_patch_count = features.shape[0]

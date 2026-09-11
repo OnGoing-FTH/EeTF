@@ -10,7 +10,7 @@ class FeatureFusion(nn.Module):
 
     Args:
         cnn_dim: CNN channel dimension after Patch-level spatial fusion.
-        feature_dim: Shared fusion dimension, default ``768``.
+        feature_dim: Shared fusion dimension, default ``256``.
 
     Inputs:
         cnn_features: ``(B, N, cnn_dim)`` or ``(B,N,cnn_dim,H,W)``.
@@ -20,7 +20,7 @@ class FeatureFusion(nn.Module):
         ``(B, N, feature_dim)``.
     """
 
-    def __init__(self, cnn_dim: int = 64, feature_dim: int = 768) -> None:
+    def __init__(self, cnn_dim: int = 64, feature_dim: int = 256) -> None:
         super().__init__()
         self.cnn_projection = nn.Sequential(
             nn.Linear(cnn_dim, feature_dim),
@@ -50,9 +50,9 @@ if __name__ == "__main__":
     import torch
 
     batch_size, patch_count = 2, 8
-    cnn_features = torch.randn(batch_size, patch_count, 64 * 16 * 8)
-    mlp_features = torch.randn(batch_size, patch_count, 768)
-    model = FeatureFusion()
+    cnn_features = torch.randn(batch_size, patch_count, 64, 64, 64)
+    mlp_features = torch.randn(batch_size, patch_count, 256)
+    model = FeatureFusion(cnn_dim=64)
     output = model(cnn_features, mlp_features)
 
     print(f"CNN input shape:  {tuple(cnn_features.shape)}")

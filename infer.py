@@ -42,8 +42,8 @@ def main() -> None:
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     if checkpoint.get('stage') == 'routing':
         raise ValueError('routing-only checkpoint has no trained segmentation decoder')
-    if 'model' in checkpoint and checkpoint.get('format_version') != 3:
-        raise ValueError('use a format_version=3 1024x1024 multi-batch checkpoint for inference')
+    if 'model' in checkpoint and checkpoint.get('format_version') != 5:
+        raise ValueError('use a format_version=5 768x768 multi-batch checkpoint for inference')
     model = EdgeDynamicViT(selection_threshold=checkpoint.get('args', {}).get('selection_threshold', 0.5)).to(device)
     model.load_state_dict(checkpoint.get("model", checkpoint))
     records = []

@@ -89,8 +89,8 @@ def main():
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
-        if checkpoint.get('format_version') != 3:
-            raise ValueError('resume requires a 1024x1024 multi-batch checkpoint (format_version=3)')
+        if checkpoint.get('format_version') != 5:
+            raise ValueError('resume requires a 768x768 multi-batch checkpoint (format_version=5)' )
         # Resume the saved schedule and split, rather than silently changing stages.
         for key, value in checkpoint['args'].items():
             if key not in {'resume', 'epochs', 'checkpoint_dir', 'run_dir', 'num_workers'}:
@@ -171,7 +171,7 @@ def main():
         if stage == 'segmentation':
             validation_metrics['router_loss'] = None
         save_validation(run_dir / 'validation' / f'epoch_{epoch + 1:04d}_{stage}', validation_metrics, stage)
-        state = dict(history=history, format_version=3, epoch=epoch, stage=stage, model=model.state_dict(),
+        state = dict(history=history, format_version=5, epoch=epoch, stage=stage, model=model.state_dict(),
                      optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), best=best,
                      args=vars(args), split=split, random_state=random.getstate(), numpy_state=np.random.get_state(),
                      torch_state=torch.get_rng_state(), loader_state=generator.get_state(),

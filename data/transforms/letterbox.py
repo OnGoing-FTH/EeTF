@@ -9,7 +9,7 @@ from torch import Tensor
 from torchvision.transforms import InterpolationMode
 from torchvision.transforms import functional as TF
 
-TARGET_SIZES: Final[tuple[tuple[int, int], ...]] = ((1024, 1024),)
+TARGET_SIZES: Final[tuple[tuple[int, int], ...]] = ((768, 768),)
 
 
 def select_target_size(height: int, width: int, target_sizes: tuple[tuple[int, int], ...] = TARGET_SIZES) -> tuple[int, int]:

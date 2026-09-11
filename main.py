@@ -19,7 +19,8 @@ class EdgeDynamicViT(nn.Module):
     """Dynamic Patch segmentation model supporting variable selected counts per batch."""
 
     def __init__(self, selection_threshold: float = 0.5, stats_dim: int = 28,
-                 patch_height: int = 64, patch_width: int = 64) -> None:
+                 patch_height: int = 64, patch_width: int = 64,
+                 feature_dim: int = 256) -> None:
         super().__init__()
         if stats_dim != 28:
             raise ValueError("stats_dim must be 28 (4 base + 24 neighborhood features)")
@@ -28,12 +29,17 @@ class EdgeDynamicViT(nn.Module):
         self.patching = ImagePatchingRect(patch_height, patch_width)
         self.block_extractor = BlockFeatureExtractor()
         self.cnn_base = CNNBase(output_channels=64)
-        self.mlp_base = MLPBase(input_dim=stats_dim)
-        self.feature_fusion = FeatureFusion(cnn_dim=64)
-        self.selector = TokenSelector(selection_threshold=selection_threshold)
+        self.feature_dim = feature_dim
+        self.mlp_base = MLPBase(input_dim=stats_dim, feature_dim=feature_dim)
+        self.feature_fusion = FeatureFusion(cnn_dim=64, feature_dim=feature_dim)
+        self.selector = TokenSelector(d_model=feature_dim, selection_threshold=selection_threshold)
         self.training_stage = "finetune"
-        self.selected_decoder = SelectedPatchDecoder(patch_height=patch_height, patch_width=patch_width)
-        self.remaining_decoder = RemainingPatchDecoder(patch_height=patch_height, patch_width=patch_width)
+        self.selected_decoder = SelectedPatchDecoder(
+            context_dim=feature_dim, patch_height=patch_height, patch_width=patch_width
+        )
+        self.remaining_decoder = RemainingPatchDecoder(
+            input_dim=feature_dim, patch_height=patch_height, patch_width=patch_width
+        )
 
     def routing_modules(self):
         return (self.block_extractor, self.cnn_base, self.mlp_base, self.feature_fusion, self.selector)

@@ -16,17 +16,17 @@ cd /home/fth/EdTF/EeTF
 默认固定 seed=42、验证比例 0.2；训练打乱，验证不打乱。训练和验证均支持
 `batch_size > 1`，同一 Batch 可有不同数量的 Selected Patch。
 训练同步几何增强，图像使用双线性插值，标签使用最近邻；训练与验证均 Letterbox 到
-固定的 `1024x1024`。
+固定的 `768x768`。
 
 ## 模块与特征流
 
 ```text
 main.py                         EdgeDynamicViT 模型
-patching/patching.py             64x64 无重叠分块，16x16 Patch Grid
+patching/patching.py             64x64 无重叠分块，12x12 Patch Grid
 utils/block_feature_extractor.py 4+16+8 维统计及四邻域结构特征
 models/cnn_base.py               Patch CNN + 二维 Grid 跨块交互 → [B,N,64,64,64]
-models/mlp_base.py               28→32→64→128→256→512→768
-models/feature_fusion.py         CNN 空间池化投影 + MLP → [B,N,768]
+models/mlp_base.py               28→32→64→128→256
+models/feature_fusion.py         64D CNN 空间池化 + 256D MLP 融合 → [B,N,256]
 models/dynamic_vit.py            阈值路由与 packed Token 分组
 models/patch_decoders.py         Selected/Remaining 双分支局部像素解码
 losses/sparse_segmentation_loss.py  加权 BCE + Dice
@@ -38,24 +38,71 @@ infer.py / engine/infer.py       掩码、叠加图与拼图
 ```
 
 ```text
-图像 [B,3,1024,1024] → Patch [B*256,3,64,64]
-  ├─ Patch CNN → DWConv/GAP → 16x16 Grid Conv → Gate → [B,256,64,64,64]
-  └─ 28 维统计 → MLP → [B,256,768]
-               ↓ CNN 空间池化后融合
-         Router → Keep 概率 [B,256]
+图像 [B,3,768,768] → Patch [B*144,3,64,64]
+  ├─ Patch CNN → Cross-Block Grid Interaction → [B,144,64,64,64]
+  └─ 28 维统计 → MLP → [B,144,256]
+               ↓ CNN 空间均值池化并融合
+         Router → Keep 概率 [B,144]
                ↓ 每个样本按阈值独立划分并打包
-  ├─ selected: 原始 Patch [M1,3,64,64] + context [M1,768]
+  ├─ selected: 原始 Patch [M1,3,64,64] + context [M1,256]
   │            → 局部 CNN + 2 层块内 Transformer → [M1,1,64,64]
-  └─ remaining: context [M2,768] → [M2,1,32,32]
+  └─ remaining: context [M2,256] → [M2,1,32,32]
                 → 上采样解码 → [M2,1,64,64]
                ↓ sample / Patch index 回填
-         mask_logits [B,1,1024,1024]
+         mask_logits [B,1,768,768]
 ```
 
 28 维为 4 维基础统计、16 维四邻域基础差异、8 维边界强度/法向梯度差异，不补零。
 只有缺失邻居的对应列为零。RGB 输入应在 `[0,1]`，统计使用 FP32；结构响应除以 32、
 标准差乘以 2、熵除以 `log2(num_levels)`、边界法向梯度差除以 2。
 外部 `block_features` 必须使用相同列顺序和尺度。Sobel 使用 replicate 填充。
+
+### 详细特征流
+
+每张输入图固定为 `768x768`，以无重叠 `64x64` Patch 切分为 `12x12=144` 个块：
+
+```text
+Patches: [B*144, 3, 64, 64]
+
+Patch CNN（每个卷积均为 kernel=3、padding=1；每层后均为 BatchNorm2d + GELU）
+1. Conv 3→32, stride=1: [B*144, 32, 64, 64]
+2. Conv 32→64, stride=1: [B*144, 64, 64, 64]
+
+Cross-Block CNN（完整 12x12 Patch Grid）
+- Patch 内 CNN 输出 reshape: [B,144,64,64,64]
+- 每个 Patch: depthwise Conv3x3 → BatchNorm2d → GELU → GAP，得到 [B,144,64]
+- Patch 网格: reshape [B,64,12,12] → Conv3x3(64→64) → BatchNorm2d → GELU
+- 广播回每个 Patch 的 64x64 特征图；Conv1x1(64→64) → Sigmoid 生成通道门控
+- 残差融合: Y = F + Gate * F_cross，输出 [B,144,64,64,64]
+
+统计 MLP（除末层外均为 Linear → LayerNorm → GELU）
+28→32→64→128→256，输出 [B,144,256]
+
+FeatureFusion
+- CNN: 对每个 Patch 的 64x64 空间维均值池化，得到 [B,144,64]，再投影到 256D
+- CNN 路径: Linear(64→256) → LayerNorm → GELU
+- 相加 MLP 256D 特征后: LayerNorm → Linear(256→256) → GELU
+- fused: [B,144,256]，供 256→192→2 Router 使用
+
+Selected Decoder（动态 packed M1 个 Patch）
+- 原始 Patch: [M1,3,64,64]
+- Conv3x3(3→64) → BatchNorm2d → GELU: [M1,64,64,64]
+- Conv3x3(64→128,stride=2) → BatchNorm2d → GELU: [M1,128,32,32]
+- MaxPool2d(2,2) 下采样到 [M1,128,16,16]，形成 256 个局部 token
+- context Linear(256→128) 广播相加；加入可学习的 16×16 块内位置编码；16x16 展平为 256 个 128D token
+- 2 层 TransformerEncoder（8 heads，FFN=512，GELU），加入可学习的 16×16 块内位置编码，仅在每个 Patch 内交互
+- Transformer 后双线性插值恢复到 [M1,128,32,32]
+- ConvTranspose2d(128→64,2x2,stride=2) → GELU: [M1,64,64,64]
+- Conv3x3(64→32) → GELU → Conv1x1(32→1): [M1,1,64,64]
+
+Remaining Decoder（动态 packed M2 个 Patch）
+- LayerNorm(256) → Linear(256→1024) → GELU，reshape [M2,1,32,32]
+- Conv3x3(1→32) → GELU → ConvTranspose2d(32→16,2x2,stride=2) → GELU
+- Conv3x3(16→1)，输出 [M2,1,64,64]
+```
+
+Selected/Remaining 的 `M1`、`M2` 是同一 Batch 内每个样本动态数量的总和；分支结果按照
+`selected_indices` 和 `remaining_indices` 回填为 `[B,1,768,768]`。
 
 ## 阈值选块
 
@@ -105,7 +152,7 @@ python train.py \
   --router-morphology-weight 0.1 --router-boundary-margin 0.1 \
   --router-pair-margin 0.2 \
   --seg-cldice-weight 0.5 --seg-cldice-iterations 10 \
-  --batch-size 1 --val-batch-size 1 \
+  --batch-size 2 --val-batch-size 1 \
   --val-ratio 0.2 --seed 26 --run-dir runs/train
 ```
 
@@ -123,7 +170,7 @@ python train.py --resume runs/train/<时间编号>/checkpoints/latest.pt --epoch
 
 恢复时使用 checkpoint 的日程、阈值及数据参数，拒绝变化的数据划分；
 可指定新的总轮数及 worker 数。新格式恢复沿用 checkpoint 所在 run，忽略新的 run-dir。
-仅支持格式版本 3 的 `1024x1024` 多 Batch checkpoint；旧尺寸、旧 RoPE 和旧分组格式的权重不兼容。
+仅支持格式版本 5 的 `768x768` 多 Batch checkpoint；旧尺寸、旧 RoPE 和旧分组格式的权重不兼容。
 原固定 top-k 训练状态不支持直接恢复。
 
 验证阶段同时报告 Patch Precision/Recall/F1 和实际选中比例；
@@ -137,7 +184,7 @@ python infer.py --input data/images --checkpoint runs/train/20260908_091004_5817
   --output-dir outputs --threshold 0.5 --tile-width 400 --tile-height 300
 ```
 
-`--input` 可为单张图或目录。推理只接受 `format_version=3` 的 `1024x1024` 多 Batch checkpoint；
+`--input` 可为单张图或目录。推理只接受 `format_version=5` 的 `768x768` 多 Batch checkpoint；
 选块阈值自动从 checkpoint 读取；`--threshold` 仅控制最终像素掩码阈值，不是选块阈值。
 去除 Letterbox 填充后恢复原始尺寸，输出：
 
@@ -213,11 +260,10 @@ Soft-clDice、Patch F1、Pixel F1 和实际选块比例。
 python -m unittest discover -s tests -v
 ```
 
-覆盖统计特征、邻域关系、1024x1024 输出、跨块 Grid 交互、多 Batch 动态分组、空分支、阶段冻结及模型/优化器重载。
+覆盖统计特征、邻域关系、768x768 输出、跨块 Grid 交互、多 Batch 动态分组、空分支、阶段冻结及模型/优化器重载。
 阈值选块可能选择所有 Patch，峰值显存不再受固定比例约束。
 ONNX 动态 nonzero 索引及空分支导出需要单独验证，当前不保证可导出。
 改变统计语义和 Selected 上下文解码器后，旧权重不再严格兼容，建议重新训练。
 
 ## 推理速度
-
-Overall: 8.84 FPS, 113.086 ms/frame 1024*1024
+FPS 10-20 之间
