@@ -77,10 +77,17 @@ def router_loss(keep_logits, patch_targets, patch_grid=None, selection_threshold
 def stage_loss(outputs, masks, segmentation_loss, stage, router_weight=1.0,
                boundary_weight=0.2, pairwise_weight=0.1, morphology_weight=0.1,
                boundary_margin=0.1, pair_margin=0.2, cldice_weight=0.2,
-               cldice_iterations=10):
+               cldice_iterations=10, sub_block_weight=1.0):
     if stage not in {"routing", "segmentation", "finetune"}:
         raise ValueError(f"unknown stage: {stage}")
     zero = masks.new_zeros(())
+    sub_block = zero
+    if outputs.get('sub_block_logits') is not None and outputs['sub_block_logits'].numel():
+        sub_targets = outputs.get('sub_targets')
+        if sub_targets is not None and sub_targets.numel():
+            sub_block = F.cross_entropy(
+                outputs['sub_block_logits'].reshape(-1, 2), sub_targets.long().reshape(-1)
+            )
     route_terms = ({key: zero for key in ('ce', 'pairwise', 'boundary', 'morphology')}
                    if stage == 'segmentation' else routing_loss_components(
                        outputs['keep_logits'], outputs['patch_targets'], outputs['patch_grid'],
@@ -92,21 +99,21 @@ def stage_loss(outputs, masks, segmentation_loss, stage, router_weight=1.0,
         pixel = zero
         structure_terms = {'cldice': zero}
         segmentation = zero
-        total = route
+        total = route + sub_block_weight * sub_block
     else:
         pixel = segmentation_loss(outputs['mask_logits'], masks)
         structure_terms = structural_segmentation_losses(
             outputs['mask_logits'], masks, cldice_iterations)
         segmentation = pixel + cldice_weight * structure_terms['cldice']
         total = segmentation + (router_weight * route if stage == 'finetune' else zero)
-    return total, pixel, route, segmentation, route_terms, structure_terms
+    return total, pixel, route, segmentation, route_terms, structure_terms, sub_block
 
 
 def train_one_epoch(model, loader, optimizer, segmentation_loss, device,
                     stage='finetune', scaler=None, router_weight=1.0,
                     boundary_weight=0.2, pairwise_weight=0.1, morphology_weight=0.1,
                     boundary_margin=0.1, pair_margin=0.2, cldice_weight=0.2,
-                    cldice_iterations=10):
+                    cldice_iterations=10, sub_block_weight=1.0):
     model.set_stage(stage)
     model.train()
     totals = defaultdict(float)
@@ -119,10 +126,11 @@ def train_one_epoch(model, loader, optimizer, segmentation_loss, device,
         with torch.autocast(device_type=device.type, enabled=scaler is not None and device.type == 'cuda'):
             outputs = model(images, labels=masks, routing_only=stage == 'routing')
             outputs['selection_threshold'] = model.selector.selection_threshold
-            loss, pixel, route, segmentation, route_terms, structure_terms = stage_loss(
+            loss, pixel, route, segmentation, route_terms, structure_terms, sub_block = stage_loss(
                 outputs, masks, segmentation_loss, stage, router_weight,
                 boundary_weight, pairwise_weight, morphology_weight,
-                boundary_margin, pair_margin, cldice_weight, cldice_iterations)
+                boundary_margin, pair_margin, cldice_weight, cldice_iterations,
+                sub_block_weight)
         if not torch.isfinite(loss):
             raise FloatingPointError(f'non-finite {stage} loss')
         if scaler is None:
@@ -134,7 +142,7 @@ def train_one_epoch(model, loader, optimizer, segmentation_loss, device,
             scaler.update()
         for name, value in (
                 ('loss', loss), ('pixel_loss', pixel), ('segmentation_loss', segmentation),
-                ('router_loss', route),
+                ('router_loss', route), ('sub_block_loss', sub_block),
                 *[(f'router_{key}_loss', value) for key, value in route_terms.items()],
                 *[(f'seg_{key}_loss', value) for key, value in structure_terms.items()]):
             totals[name] += value.detach().item()

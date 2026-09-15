@@ -58,6 +58,7 @@ def parse_args():
     parser.add_argument('--router-boundary-weight', type=float, default=0.2)
     parser.add_argument('--router-pairwise-weight', type=float, default=0.1)
     parser.add_argument('--router-morphology-weight', type=float, default=0.1)
+    parser.add_argument('--sub-block-weight', type=float, default=1.0)
     parser.add_argument('--router-boundary-margin', type=float, default=0.1)
     parser.add_argument('--router-pair-margin', type=float, default=0.2)
     parser.add_argument('--seg-cldice-weight', type=float, default=0.5)
@@ -75,7 +76,7 @@ def parse_args():
     if not 0 < args.finetune_lr_multiplier <= 1 or args.learning_rate <= 0 or args.router_weight <= 0:
         parser.error('require positive learning rate/router weight and finetune multiplier in (0,1]')
     weights = (args.router_boundary_weight, args.router_pairwise_weight,
-               args.router_morphology_weight, args.seg_cldice_weight)
+               args.router_morphology_weight, args.seg_cldice_weight, args.sub_block_weight)
     margins = (args.router_boundary_margin, args.router_pair_margin)
     if any(value < 0 for value in weights + margins):
         parser.error('structure loss weights and margins must be non-negative')
@@ -89,8 +90,8 @@ def main():
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
-        if checkpoint.get('format_version') != 5:
-            raise ValueError('resume requires a 768x768 multi-batch checkpoint (format_version=5)' )
+        if checkpoint.get('format_version') != 6:
+            raise ValueError('resume requires a 2560x2560 hierarchical checkpoint (format_version=6)' )
         # Resume the saved schedule and split, rather than silently changing stages.
         for key, value in checkpoint['args'].items():
             if key not in {'resume', 'epochs', 'checkpoint_dir', 'run_dir', 'num_workers'}:
@@ -153,6 +154,7 @@ def main():
                           boundary_weight=args.router_boundary_weight,
                           pairwise_weight=args.router_pairwise_weight,
                           morphology_weight=args.router_morphology_weight,
+                          sub_block_weight=args.sub_block_weight,
                           boundary_margin=args.router_boundary_margin,
                           pair_margin=args.router_pair_margin,
                           cldice_weight=args.seg_cldice_weight,
@@ -171,7 +173,7 @@ def main():
         if stage == 'segmentation':
             validation_metrics['router_loss'] = None
         save_validation(run_dir / 'validation' / f'epoch_{epoch + 1:04d}_{stage}', validation_metrics, stage)
-        state = dict(history=history, format_version=5, epoch=epoch, stage=stage, model=model.state_dict(),
+        state = dict(history=history, format_version=6, epoch=epoch, stage=stage, model=model.state_dict(),
                      optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), best=best,
                      args=vars(args), split=split, random_state=random.getstate(), numpy_state=np.random.get_state(),
                      torch_state=torch.get_rng_state(), loader_state=generator.get_state(),

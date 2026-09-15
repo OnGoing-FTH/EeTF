@@ -22,7 +22,7 @@ class EdgeDataset(Dataset[dict[str, Tensor | str]]):
 
     Training samples receive randomized synchronized augmentation. Validation
     samples only receive aspect-ratio-aware letterboxing, preserving the exact
-    image/mask relationship. The model currently requires DataLoader batch size 1.
+    image/mask relationship. The model supports DataLoader batches with per-sample dynamic macro-patch selection.
     """
 
     def __init__(

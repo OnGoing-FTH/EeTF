@@ -11,7 +11,7 @@ from metrics import compute_sparse_edge_metrics
 def validate(model, loader, segmentation_loss, device, stage='finetune', router_weight=1.0,
              boundary_weight=0.2, pairwise_weight=0.1, morphology_weight=0.1,
              boundary_margin=0.1, pair_margin=0.2, cldice_weight=0.2,
-             cldice_iterations=10):
+             cldice_iterations=10, sub_block_weight=1.0):
     model.eval()
     totals = defaultdict(float)
     count = 0
@@ -21,13 +21,14 @@ def validate(model, loader, segmentation_loss, device, stage='finetune', router_
         masks = batch['mask'].to(device)
         outputs = model(images, labels=masks, routing_only=stage == 'routing')
         outputs['selection_threshold'] = model.selector.selection_threshold
-        loss, pixel, route, segmentation, route_terms, structure_terms = stage_loss(
+        loss, pixel, route, segmentation, route_terms, structure_terms, sub_block = stage_loss(
             outputs, masks, segmentation_loss, stage, router_weight,
             boundary_weight, pairwise_weight, morphology_weight,
-            boundary_margin, pair_margin, cldice_weight, cldice_iterations)
+            boundary_margin, pair_margin, cldice_weight, cldice_iterations,
+            sub_block_weight)
         for name, value in (
                 ('loss', loss), ('pixel_loss', pixel), ('segmentation_loss', segmentation),
-                ('router_loss', route),
+                ('router_loss', route), ('sub_block_loss', sub_block),
                 *[(f'router_{key}_loss', value) for key, value in route_terms.items()],
                 *[(f'seg_{key}_loss', value) for key, value in structure_terms.items()]):
             totals[name] += value.item()

@@ -66,17 +66,19 @@ class CNNBase(nn.Module):
         ``[B, N, output_channels, H1, W1]``.
     """
 
-    def __init__(self, output_channels: int = 64) -> None:
+    def __init__(self, output_channels: int = 64, spatial_stride: int = 1) -> None:
         super().__init__()
         if output_channels < 1:
             raise ValueError("output_channels must be positive")
+        if spatial_stride < 1 or spatial_stride & (spatial_stride - 1):
+            raise ValueError("spatial_stride must be a positive power of two")
         hidden = max(16, output_channels // 2)
         self.output_channels = output_channels
         self.intra_patch = nn.Sequential(
             nn.Conv2d(3, hidden, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(hidden),
             nn.GELU(),
-            nn.Conv2d(hidden, output_channels, kernel_size=3, padding=1, bias=False),
+            nn.Conv2d(hidden, output_channels, kernel_size=3, stride=spatial_stride, padding=1, bias=False),
             nn.BatchNorm2d(output_channels),
             nn.GELU(),
         )
