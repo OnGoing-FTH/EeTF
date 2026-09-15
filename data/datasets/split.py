@@ -14,11 +14,15 @@ def split_edge_dataset(
     val_ratio: float = 0.2,
     seed: int = 42,
     target_sizes: tuple[tuple[int, int], ...] | None = None,
+    tile_size: int = 256,
+    max_size: int | None = None,
 ) -> tuple[EdgeDataset, EdgeDataset]:
     """Pair first, shuffle with ``seed``, and return train/validation datasets."""
     if not 0.0 < val_ratio < 1.0:
         raise ValueError("val_ratio must be between 0 and 1")
     common = {"image_dir": image_dir, "mask_dir": mask_dir}
+    common["tile_size"] = tile_size
+    common["max_size"] = max_size
     if target_sizes is not None:
         common["target_sizes"] = target_sizes
     full = EdgeDataset(training=False, **common)

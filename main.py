@@ -19,7 +19,7 @@ class EdgeDynamicViT(nn.Module):
     """Dynamic Patch segmentation model supporting variable selected counts per batch."""
 
     def __init__(self, selection_threshold: float = 0.5, stats_dim: int = 28,
-                 patch_height: int = 64, patch_width: int = 64,
+                 patch_height: int = 16, patch_width: int = 16,
                  feature_dim: int = 256) -> None:
         super().__init__()
         if stats_dim != 28:
@@ -106,6 +106,34 @@ class EdgeDynamicViT(nn.Module):
                 ro += nr
         full = full.reshape(batch_size, hp, wp, 1, ph, pw).permute(0, 3, 1, 4, 2, 5)
         return full.reshape(batch_size, 1, hp * ph, wp * pw)
+
+    def forward_deploy(self, images: Tensor) -> dict[str, Tensor]:
+        """Static-shape inference path for ONNX/TensorRT export.
+
+        Both patch decoders run for all 256 patches; the router mask selects
+        their logits with tensor operations only, avoiding packed Python lists.
+        """
+        if images.ndim != 4 or images.shape[1:] != (3, 256, 256):
+            raise ValueError("forward_deploy expects [B,3,256,256]")
+        batch_size = images.shape[0]
+        patches, patch_grid = self.patching(images)
+        cnn_maps = self.cnn_base(patches, patch_grid)
+        statistics = self.block_extractor(patches, batch_size=batch_size, grid_size=patch_grid)
+        fused = self.feature_fusion(cnn_maps, self.mlp_base(statistics, patch_grid))
+        keep_logits = self.selector.router(fused)
+        keep_probs = keep_logits.softmax(-1)[..., 1]
+        selected = self.selected_decoder(patches, fused).reshape(batch_size, patch_grid[0] * patch_grid[1], 1, 16, 16)
+        remaining = self.remaining_decoder(fused.reshape(-1, fused.shape[-1])).reshape(
+            batch_size, patch_grid[0] * patch_grid[1], 1, 16, 16
+        )
+        merged = torch.where(
+            (keep_probs >= self.selector.selection_threshold)[..., None, None, None],
+            selected,
+            remaining,
+        )
+        merged = merged.reshape(batch_size, patch_grid[0], patch_grid[1], 1, 16, 16)
+        merged = merged.permute(0, 3, 1, 4, 2, 5).reshape(batch_size, 1, 256, 256)
+        return {"mask_logits": merged, "keep_logits": keep_logits, "keep_probs": keep_probs}
 
     def forward(self, images: Tensor, labels: Optional[Tensor] = None,
                 block_features: Optional[Tensor] = None, routing_only: bool = False):

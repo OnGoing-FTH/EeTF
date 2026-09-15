@@ -66,6 +66,9 @@ def parse_args():
     parser.add_argument('--val-batch-size', type=int, default=1)
     parser.add_argument('--num-workers', type=int, default=0)
     parser.add_argument('--run-dir', '--checkpoint-dir', dest='run_dir', default='runs/train', help='parent directory for timestamped training runs')
+    parser.add_argument('--tile-size', type=int, default=256)
+    parser.add_argument('--patch-size', type=int, default=16)
+    parser.add_argument('--max-size', type=int, default=None, help='optional resized long-side limit before 256 alignment')
     parser.add_argument('--resume', default=None)
     args = parser.parse_args()
     if args.batch_size < 1 or args.val_batch_size < 1:
@@ -89,8 +92,8 @@ def main():
     checkpoint = None
     if args.resume:
         checkpoint = torch.load(args.resume, map_location='cpu', weights_only=False)
-        if checkpoint.get('format_version') != 5:
-            raise ValueError('resume requires a 768x768 multi-batch checkpoint (format_version=5)' )
+        if checkpoint.get('format_version') != 6:
+            raise ValueError('resume requires a tile checkpoint (format_version=6)')
         # Resume the saved schedule and split, rather than silently changing stages.
         for key, value in checkpoint['args'].items():
             if key not in {'resume', 'epochs', 'checkpoint_dir', 'run_dir', 'num_workers'}:
@@ -99,9 +102,12 @@ def main():
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if args.tile_size != 256 or args.patch_size != 16:
+        raise ValueError('the current tile contract requires tile-size=256 and patch-size=16')
     train_data, val_data = split_edge_dataset(Path(args.data_root) / args.image_dir,
                                              Path(args.data_root) / args.mask_dir,
-                                             val_ratio=args.val_ratio, seed=args.seed)
+                                             val_ratio=args.val_ratio, seed=args.seed,
+                                             tile_size=args.tile_size, max_size=args.max_size)
     split = {'train': [str(p[0].resolve()) for p in train_data.samples],
              'val': [str(p[0].resolve()) for p in val_data.samples]}
     if checkpoint and checkpoint['split'] != split:
@@ -111,7 +117,8 @@ def main():
                               num_workers=args.num_workers, pin_memory=device.type == 'cuda')
     val_loader = DataLoader(val_data, batch_size=args.val_batch_size, shuffle=False,
                             num_workers=args.num_workers, pin_memory=device.type == 'cuda')
-    model = EdgeDynamicViT(selection_threshold=args.selection_threshold).to(device)
+    model = EdgeDynamicViT(selection_threshold=args.selection_threshold,
+                            patch_height=args.patch_size, patch_width=args.patch_size).to(device)
     optimizer = make_optimizer(model, args.learning_rate, args.weight_decay)
     scaler = torch.amp.GradScaler('cuda', enabled=device.type == 'cuda')
     loss_fn = SparseEdgeLoss()
@@ -171,8 +178,9 @@ def main():
         if stage == 'segmentation':
             validation_metrics['router_loss'] = None
         save_validation(run_dir / 'validation' / f'epoch_{epoch + 1:04d}_{stage}', validation_metrics, stage)
-        state = dict(history=history, format_version=5, epoch=epoch, stage=stage, model=model.state_dict(),
-                     optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), best=best,
+        state = dict(history=history, format_version=6, tile_size=args.tile_size,
+                     patch_size=args.patch_size, patch_grid=(16, 16), num_patches=256,
+                     epoch=epoch, stage=stage, model=model.state_dict(),                     optimizer=optimizer.state_dict(), scaler=scaler.state_dict(), best=best,
                      args=vars(args), split=split, random_state=random.getstate(), numpy_state=np.random.get_state(),
                      torch_state=torch.get_rng_state(), loader_state=generator.get_state(),
                      cuda_states=torch.cuda.get_rng_state_all() if device.type == 'cuda' else None)

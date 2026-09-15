@@ -18,7 +18,6 @@ from engine.infer import (
 )
 from main import EdgeDynamicViT
 from engine.benchmark import benchmark_forward
-from data.transforms.letterbox import letterbox, select_target_size
 from utils.run_logging import create_run, save_json
 
 
@@ -28,6 +27,7 @@ def main() -> None:
     parser.add_argument("--checkpoint", required=True)
     parser.add_argument("--output-dir", default="outputs")
     parser.add_argument("--threshold", type=float, default=0.5)
+    parser.add_argument("--tile-batch-size", type=int, default=16)
     parser.add_argument("--tile-width", type=int, default=320)
     parser.add_argument("--tile-height", type=int, default=240)
     parser.add_argument("--no-contact-sheet", action="store_true")
@@ -42,9 +42,10 @@ def main() -> None:
     checkpoint = torch.load(args.checkpoint, map_location=device, weights_only=False)
     if checkpoint.get('stage') == 'routing':
         raise ValueError('routing-only checkpoint has no trained segmentation decoder')
-    if 'model' in checkpoint and checkpoint.get('format_version') != 5:
-        raise ValueError('use a format_version=5 768x768 multi-batch checkpoint for inference')
-    model = EdgeDynamicViT(selection_threshold=checkpoint.get('args', {}).get('selection_threshold', 0.5)).to(device)
+    if 'model' in checkpoint and checkpoint.get('format_version') != 6:
+        raise ValueError('use a format_version=6 tiled checkpoint for inference')
+    model = EdgeDynamicViT(selection_threshold=checkpoint.get('args', {}).get('selection_threshold', 0.5),
+                           patch_height=16, patch_width=16).to(device)
     model.load_state_dict(checkpoint.get("model", checkpoint))
     records = []
     image_paths = iter_images(args.input)
@@ -57,8 +58,7 @@ def main() -> None:
         results = []
         for image_path in image_paths:
             image = load_image(image_path)
-            resized, _, _ = letterbox(image, select_target_size(*image.shape[-2:]))
-            inputs = resized.unsqueeze(0).to(device)
+            inputs = image.unsqueeze(0).to(device)
             result = benchmark_forward(model, inputs, args.warmup, args.iterations)
             result['image'] = str(image_path)
             results.append(result)
@@ -77,7 +77,7 @@ def main() -> None:
         return
     for image_path in image_paths:
         image = load_image(image_path)
-        probability = predict_image(model, image, device)
+        probability = predict_image(model, image, device, args.tile_batch_size)
         overlay = make_overlay(image, probability, args.threshold)
         paths = save_prediction(probability, output_dir, image_path.stem, args.threshold, image=image)
         original_pil = Image.fromarray(

@@ -11,7 +11,7 @@ class SelectedPatchDecoder(nn.Module):
     """Produce detailed masks from selected raw image patches."""
 
     def __init__(self, embed_dim: int = 128, nheads: int = 8,
-                 context_dim: int = 256, patch_height: int = 64, patch_width: int = 64) -> None:
+                 context_dim: int = 256, patch_height: int = 16, patch_width: int = 16) -> None:
         super().__init__()
         if patch_height < 4 or patch_width < 4 or patch_height % 4 or patch_width % 4:
             raise ValueError("patch dimensions must be divisible by 4 and at least 4")
@@ -80,7 +80,7 @@ class SelectedPatchDecoder(nn.Module):
 class RemainingPatchDecoder(nn.Module):
     """Recover coarse masks from the 256-dimensional unselected patch features."""
 
-    def __init__(self, input_dim: int = 256, patch_height: int = 64, patch_width: int = 64) -> None:
+    def __init__(self, input_dim: int = 256, patch_height: int = 16, patch_width: int = 16) -> None:
         super().__init__()
         if patch_height < 2 or patch_width < 2 or patch_height % 2 or patch_width % 2:
             raise ValueError("patch dimensions must be even and at least 2")
@@ -125,8 +125,7 @@ def merge_patch_logits(
     remaining_logits: Tensor,
     remaining_indices: Tensor,
     patch_grid: tuple[int, int],
-    patch_size: tuple[int, int] = (64, 64),
-) -> Tensor:
+    patch_size: tuple[int, int] = (16, 16),) -> Tensor:
     """Restore full-resolution mask logits for a single sample.
 
     Multi-batch packed routing is handled by ``EdgeDynamicViT``.

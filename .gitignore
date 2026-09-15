@@ -8,3 +8,5 @@ outputs
 __pycache__/
 *.pyc
 runs/
+data_256
+test_data

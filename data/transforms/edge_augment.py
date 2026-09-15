@@ -29,6 +29,8 @@ class EdgeAugment:
     def __init__(
         self,
         target_sizes: tuple[tuple[int, int], ...] = TARGET_SIZES,
+        tile_size: int = 256,
+        max_size: int | None = None,
         rotation_degrees: float = 15.0,
         shear_degrees: float = 5.0,
         scale_range: tuple[float, float] = (0.8, 1.2),
@@ -41,6 +43,8 @@ class EdgeAugment:
         shadow_prob: float = 0.3,
     ) -> None:
         self.target_sizes = target_sizes
+        self.tile_size = tile_size
+        self.max_size = max_size
         self.rotation_degrees = rotation_degrees
         self.shear_degrees = shear_degrees
         self.scale_range = scale_range
@@ -117,6 +121,7 @@ class EdgeAugment:
         if random.random() < self.shadow_prob:
             image = self._shadow(image)
 
-        target_size = random.choice(self.target_sizes)
-        image, mask, _ = letterbox(image, target_size, mask)
+        # Augmentation operates on one already-cropped tile and returns the
+        # fixed deployment shape. No random target size is used here.
+        image, mask, _ = letterbox(image, (self.tile_size, self.tile_size), mask)
         return image.clamp(0, 1), mask.clamp(0, 1)

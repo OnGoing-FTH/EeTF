@@ -144,15 +144,15 @@ Router 使用独立选块监督，CNN/MLP/融合可经像素特征路径更新�
 
 ```bash
 python train.py \
-  --data-root data --image-dir images --mask-dir edge_maps \
-  --epochs 100 --routing-epochs 45 --frozen-epochs 54 \
+  --data-root data_256 --image-dir images --mask-dir edge_maps \
+  --epochs 50 --routing-epochs 25 --frozen-epochs 20 \
   --selection-threshold 0.5 --learning-rate 1e-4 \
   --finetune-lr-multiplier 0.1 --router-weight 1.0 \
   --router-boundary-weight 0.2 --router-pairwise-weight 0.1 \
   --router-morphology-weight 0.1 --router-boundary-margin 0.1 \
   --router-pair-margin 0.2 \
-  --seg-cldice-weight 0.5 --seg-cldice-iterations 10 \
-  --batch-size 2 --val-batch-size 1 \
+  --seg-cldice-weight 0.4 --seg-cldice-iterations 10 \
+  --batch-size 16 --val-batch-size 4 \
   --val-ratio 0.2 --seed 26 --run-dir runs/train
 ```
 
@@ -266,4 +266,4 @@ ONNX 动态 nonzero 索引及空分支导出需要单独验证，当前不保证
 改变统计语义和 Selected 上下文解码器后，旧权重不再严格兼容，建议重新训练。
 
 ## 推理速度
-FPS 10-20 之间
+FPS 150-300 之间
