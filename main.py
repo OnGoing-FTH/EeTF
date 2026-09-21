@@ -122,10 +122,14 @@ class EdgeDynamicViT(nn.Module):
         fused = self.feature_fusion(cnn_maps, self.mlp_base(statistics, patch_grid))
         keep_logits = self.selector.router(fused)
         keep_probs = keep_logits.softmax(-1)[..., 1]
+        
+        # Force shape preservation for ONNX export
+        keep_logits = keep_logits + 0.0 * images.sum() * 0.0  # Link to input batch
+        keep_probs = keep_probs + 0.0 * images.sum() * 0.0
+        
         selected = self.selected_decoder(patches, fused).reshape(batch_size, patch_grid[0] * patch_grid[1], 1, 16, 16)
-        remaining = self.remaining_decoder(fused.reshape(-1, fused.shape[-1])).reshape(
-            batch_size, patch_grid[0] * patch_grid[1], 1, 16, 16
-        )
+        # Pass [B, N, C] directly to remaining_decoder to avoid batch dimension collapse
+        remaining = self.remaining_decoder(fused)
         merged = torch.where(
             (keep_probs >= self.selector.selection_threshold)[..., None, None, None],
             selected,

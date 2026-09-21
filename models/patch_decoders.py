@@ -103,20 +103,24 @@ class RemainingPatchDecoder(nn.Module):
         """Return coarse pixel logits with shape ``[B, N2, 1, Hpatch, Wpatch]``."""
         if features.ndim == 3:
             batch_size, patch_count, _ = features.shape
-            flat = features.reshape(batch_size * patch_count, -1)
-            shape = (batch_size, patch_count)
+            # Flatten to [B*N, C] for MLP processing
+            flat = features.reshape(-1, features.shape[-1])
+            # MLP output: [B*N, H*W//4] -> reshape to [B*N, 1, H//2, W//2]
+            low_resolution = self.to_low_resolution(flat).reshape(
+                -1, 1, self.patch_height // 2, self.patch_width // 2
+            )
+            # Super-resolution: [B*N, 1, H//2, W//2] -> [B*N, 1, H, W]
+            masks = self.super_resolution(low_resolution)
+            # Reshape back to [B, N, 1, H, W]
+            return masks.reshape(batch_size, patch_count, 1, self.patch_height, self.patch_width)
         elif features.ndim == 2:
-            flat = features
-            shape = (features.shape[0], 1)
+            # [M, C] -> [M, H*W//4] -> [M, 1, H//2, W//2] -> [M, 1, H, W]
+            low_resolution = self.to_low_resolution(features).reshape(
+                -1, 1, self.patch_height // 2, self.patch_width // 2
+            )
+            return self.super_resolution(low_resolution)
         else:
             raise ValueError("features must be [B,N,256] or [M,256]")
-        low_resolution = self.to_low_resolution(flat).reshape(
-            flat.shape[0], 1, self.patch_height // 2, self.patch_width // 2
-        )
-        masks = self.super_resolution(low_resolution)
-        if features.ndim == 2:
-            return masks
-        return masks.reshape(shape[0], shape[1], 1, self.patch_height, self.patch_width)
 
 
 def merge_patch_logits(

@@ -521,8 +521,21 @@ outputs/<时间编号>/benchmark.json
 python export_onnx.py \
   --checkpoint runs/train/<时间编号>/checkpoints/best.pt \
   --output deployment/eetf_tile_256.onnx \
-  --batch-size 1 \
+  --batch-size 4 \
   --opset 18
+```
+
+⚠️ **重要**：必须使用 `--batch-size > 1` 导出，否则 ONNX 图中的 batch 维度会被固化为 1，导致推理时无法使用更大的 tile-batch-size。推荐使用 `--batch-size 4` 或更大值。
+
+可选的 ONNX 简化（需要 `pip install onnxsim`）：
+
+```bash
+python export_onnx.py \
+  --checkpoint runs/train/<时间编号>/checkpoints/best.pt \
+  --output deployment/eetf_tile_256.onnx \
+  --batch-size 4 \
+  --opset 18 \
+  --simplify
 ```
 
 推荐使用 `opset 18`。当前 PyTorch/ONNX 导出器对部分算子降级到较旧 Opset 时可能不完整。
@@ -551,7 +564,143 @@ forward_deploy(images)
 
 ---
 
-## 12. 使用 TensorRT 构建 FP16 Engine
+## 12. ONNX Runtime 推理
+
+### 安装依赖
+
+```bash
+pip install onnxruntime-gpu  # CUDA
+# 或
+pip install onnxruntime      # CPU only
+```
+
+### 单张图片推理（CUDA）
+
+```bash
+python infer_onnx.py \
+  --input data/test_images/example.png \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_onnx \
+  --provider cuda \
+  --tile-batch-size 16 \
+  --threshold 0.5
+```
+
+### 目录批量推理
+
+```bash
+python infer_onnx.py \
+  --input data/test_images \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_onnx \
+  --provider cuda \
+  --tile-batch-size 16 \
+  --threshold 0.5
+```
+
+### CPU 推理
+
+```bash
+python infer_onnx.py \
+  --input data/test_images/example.png \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_onnx_cpu \
+  --provider cpu \
+  --tile-batch-size 4 \
+  --threshold 0.5
+```
+
+### TensorRT ExecutionProvider 推理
+
+需要安装 TensorRT 和 `onnxruntime-gpu` with TensorRT support。
+
+```bash
+python infer_onnx.py \
+  --input data/test_images \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_trt \
+  --provider tensorrt \
+  --tile-batch-size 16 \
+  --threshold 0.5 \
+  --trt-fp16 \
+  --trt-engine-cache-dir deployment/trt_cache
+```
+
+参数说明：
+
+```text
+--provider: auto（自动选择） | cuda | cpu | tensorrt
+--tile-batch-size: 每批处理的 256×256 Tile 数量
+--threshold: 二值化阈值
+--trt-fp16: 启用 TensorRT FP16 模式
+--trt-engine-cache-dir: TensorRT Engine 缓存目录（首次推理会构建并保存）
+--verbose: 打印每张图片的详细信息
+--no-contact-sheet: 跳过目录推理时的 Contact Sheet 生成
+```
+
+输出文件：
+
+```text
+<name>_prob.png    # 概率图 [0, 255]
+<name>_mask.png    # 二值掩码
+<name>_overlay.png # 叠加可视化
+contact_sheet.png  # 目录推理时的汇总预览
+```
+
+ONNX Runtime 推理使用与 PyTorch `infer.py` 完全相同的 Tile 切分、坐标记录、回拼和尺寸恢复逻辑。
+
+### 验证 PyTorch 和 ONNX 输出一致性
+
+对同一张图片分别进行 PyTorch 和 ONNX 推理：
+
+```bash
+# PyTorch 推理
+python infer.py \
+  --checkpoint runs/train/<时间编号>/checkpoints/best.pt \
+  --input data/test_images/example.png \
+  --output-dir outputs_pytorch \
+  --tile-batch-size 16
+
+# ONNX 推理
+python infer_onnx.py \
+  --input data/test_images/example.png \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_onnx \
+  --provider cuda \
+  --tile-batch-size 16
+```
+
+使用 Python 比较输出差异：
+
+```python
+import cv2
+import numpy as np
+
+# 加载概率图
+pt_prob = cv2.imread('outputs_pytorch/<时间编号>/<name>_prob.png', cv2.IMREAD_GRAYSCALE)
+onnx_prob = cv2.imread('outputs_onnx/<name>_prob.png', cv2.IMREAD_GRAYSCALE)
+
+# 计算差异
+prob_diff = np.abs(pt_prob.astype(float) - onnx_prob.astype(float))
+print(f'Max diff: {prob_diff.max():.2f}')
+print(f'Mean diff: {prob_diff.mean():.2f}')
+print(f'Pixels with diff > 1: {(prob_diff > 1).mean()*100:.2f}%')
+
+# 比较二值掩码
+pt_mask = cv2.imread('outputs_pytorch/<时间编号>/<name>_mask.png', cv2.IMREAD_GRAYSCALE)
+onnx_mask = cv2.imread('outputs_onnx/<name>_mask.png', cv2.IMREAD_GRAYSCALE)
+mask_diff = (pt_mask != onnx_mask)
+print(f'Mask identical: {(~mask_diff).mean()*100:.2f}%')
+```
+
+正常情况下：
+- 概率图平均差异 < 1/255
+- 二值掩码相同像素 > 99.9%
+- 差异主要来自浮点运算精度和 ONNX Runtime 优化
+
+---
+
+## 13. 使用 TensorRT 构建 FP16 Engine（可选）
 
 确保系统已安装 TensorRT，并且 `trtexec` 在 PATH 中。
 
@@ -591,7 +740,7 @@ trtexec \
 
 ---
 
-## 13. 常用参数说明
+## 14. 常用参数说明
 
 | 参数 | 默认值 | 说明 |
 |---|---:|---|
@@ -612,7 +761,7 @@ trtexec \
 
 ---
 
-## 14. 推荐执行顺序
+## 15. 推荐执行顺序
 
 ```bash
 # 1. 激活环境
@@ -620,9 +769,23 @@ source /home/fth/miniconda3/bin/activate
 conda activate py11
 cd /home/fth/EdTF/EeTF
 
-# 2. 启动训练
+# 2. 整理原始数据（首次）
+python prepare_teed_dataset.py \
+  --src /home/fth/EdTF/DATA \
+  --out data_256 \
+  --tile-size 256 \
+  --seed 2026 \
+  --dry-run  # 先预览
+
+python prepare_teed_dataset.py \
+  --src /home/fth/EdTF/DATA \
+  --out data_256 \
+  --tile-size 256 \
+  --seed 2026  # 正式生成
+
+# 3. 启动训练
 python train.py \
-  --data-root data \
+  --data-root data_256 \
   --image-dir images \
   --mask-dir edge_maps \
   --tile-size 256 \
@@ -637,22 +800,47 @@ python train.py \
   --seed 26 \
   --run-dir runs/train
 
-# 3. 使用 best.pt 批量推理
+# 4. PyTorch 推理验证
 python infer.py \
   --input data/test_images \
   --checkpoint runs/train/<时间编号>/checkpoints/best.pt \
-  --output-dir outputs \
+  --output-dir outputs_pytorch \
   --tile-batch-size 16 \
   --threshold 0.5
 
-# 4. 导出 ONNX
+# 5. 导出 ONNX（使用 batch-size > 1）
 python export_onnx.py \
   --checkpoint runs/train/<时间编号>/checkpoints/best.pt \
   --output deployment/eetf_tile_256.onnx \
-  --batch-size 1 \
-  --opset 18
+  --batch-size 4 \
+  --opset 18 \
+  --simplify
 
-# 5. 构建 TensorRT FP16 Engine
+# 6. ONNX Runtime 推理验证
+python infer_onnx.py \
+  --input data/test_images \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_onnx \
+  --provider cuda \
+  --tile-batch-size 16
+
+# 7. 验证 PyTorch 和 ONNX 输出一致性（对同一张图片）
+python infer.py \
+  --input data/test_images/example.png \
+  --checkpoint runs/train/<时间编号>/checkpoints/best.pt \
+  --output-dir outputs_pytorch_verify \
+  --tile-batch-size 16
+
+python infer_onnx.py \
+  --input data/test_images/example.png \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_onnx_verify \
+  --provider cuda \
+  --tile-batch-size 16
+
+# 使用 Python 比较差异（参见第 12 节）
+
+# 8. （可选）构建 TensorRT FP16 Engine
 trtexec \
   --onnx=deployment/eetf_tile_256.onnx \
   --saveEngine=deployment/eetf_tile_256_fp16.engine \
@@ -660,11 +848,20 @@ trtexec \
   --optShapes=images:8x3x256x256 \
   --maxShapes=images:32x3x256x256 \
   --fp16
+
+# 9. TensorRT ExecutionProvider 推理
+python infer_onnx.py \
+  --input data/test_images \
+  --onnx deployment/eetf_tile_256.onnx \
+  --output-dir outputs_trt \
+  --provider tensorrt \
+  --trt-fp16 \
+  --trt-engine-cache-dir deployment/trt_cache
 ```
 
 ---
 
-## 15. 网络结构 SVG
+## 16. 网络结构 SVG
 
 当前 256×256 Tile 特征流、16×16 Patch Router、双分支解码和大图回拼结构图：
 

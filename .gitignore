@@ -10,3 +10,7 @@ __pycache__/
 runs/
 data_256
 test_data
+deployment
+outputs_onnx
+infer_output_onnx
+infer_output_pytorch
