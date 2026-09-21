@@ -533,7 +533,7 @@ python export_onnx.py \
 python export_onnx.py \
   --checkpoint runs/train/<时间编号>/checkpoints/best.pt \
   --output deployment/eetf_tile_256.onnx \
-  --batch-size 4 \
+  --batch-size 32 \
   --opset 18 \
   --simplify
 ```

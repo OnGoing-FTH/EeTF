@@ -47,7 +47,7 @@ class EdgeDataset(Dataset):
     def _load_image(path):
         with Image.open(path) as image:
             array = np.array(image.convert("RGB"), dtype=np.float32, copy=True)
-        return torch.from_numpy(array).permute(2, 0, 1).div(255.0)
+        return torch.from_numpy(array).permute(2, 0, 1).div(255.0) # bgr-rgb,to tensor 归一化
 
     def _index_tiles(self):
         records = []
